@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 """
-Title: Calculation of Raman Activities from VASP and Phonopy Output Files
+Title: Calculation of Raman Activities from VASP DFPT Output Files
 
 Authors: Rui Zhang (original);
          Phani Ravi Teja Nunna (refactor and enhancements)
@@ -9,7 +9,7 @@ Authors: Rui Zhang (original);
 Patches: auto atomic-mass lookup,
          variable mode count (filtered imaginary modes),
          subdirectory-based OUTCAR paths (./1/OUTCAR, ./m1/OUTCAR, ...),
-         CSV output named raman_<parent>_<E>.csv, modular structure,
+         CSV output named raman_<parent>-<E>.csv, modular structure,
          CSV metadata header.
          added plot outut option,
          and auto-generated informative plot title.
@@ -23,35 +23,36 @@ Cite: Zhang, Rui, et al. "RASCBEC: Raman spectroscopy calculation
       via born effective charge." Computer Physics Communications 307 (2025): 109425
 
 Description:
-    Reads VASP/phonopy output to calculate Raman activities per phonon mode
+    Reads VASP DFPT output to calculate Raman activities per phonon mode
     using the RASCBEC method.
 
+    Key distinction from RASCBEC_phonopy.py:
+      - VASP outputs frequencies already in cm-1  (no THz conversion)
+      - VASP eigenvectors are already mass-normalised (no /sqrt(mass) step)
+
     Required files (in working directory):
-      POSCAR                — structure
-      ./1/OUTCAR            — BEC, E-field along + (unrotated)
-      ./m1/OUTCAR           — BEC, E-field along - (unrotated)
-      ./x/OUTCAR            — BEC, E-field along +x (rotated along x-axis)
-      ./mx/OUTCAR           — BEC, E-field along -x (rotated along x-axis)
-      ./y/OUTCAR            — BEC, E-field along +y (rotated along y-axis)
-      ./my/OUTCAR           — BEC, E-field along -y (rotated along y-axis)
-      ./z/OUTCAR            — BEC, E-field along +z (rotated along z-axis)
-      ./mz/OUTCAR           — BEC, E-field along -z (rotated along z-axis)
-      freqs_phonopy.dat     — phonon frequencies, shape (N_modes,), unit THz
-      eigvecs_phonopy.dat   — phonon eigenvectors, shape (3N × N_modes)
+      POSCAR              — structure
+      ./1/OUTCAR          — BEC, E-field along + (unrotated)
+      ./m1/OUTCAR         — BEC, E-field along - (unrotated)
+      ./x/OUTCAR          — BEC, E-field along +x (rotated along x-axis)
+      ./mx/OUTCAR         — BEC, E-field along -x (rotated along x-axis)
+      ./y/OUTCAR          — BEC, E-field along +y (rotated along y-axis)
+      ./my/OUTCAR         — BEC, E-field along -y (rotated along y-axis)
+      ./z/OUTCAR          — BEC, E-field along +z (rotated along z-axis)
+      ./mz/OUTCAR         — BEC, E-field along -z (rotated along z-axis)
+      freqs_vasp.dat      — phonon frequencies, shape (3N,), unit cm-1
+      eigvecs_vasp.dat    — mass-normalised eigenvectors, shape (3N × 3N)
 
 Output naming:
-    raman_<parent>_<E>.csv / raman_<parent>_<E>.png where <parent> is the
-    directory one level above cwd and <E> is the EFIELD_PEAD value.
+    raman_<parent>_<E>.csv / raman_<parent>_<E>.png where <parent> is the directory
+    one level above cwd and <E> is the EFIELD_PEAD value.
     Example: running from ~/calcs/06-12/9-RASCBEC with E=0.02
              → raman_06-12_0.02.csv / raman_06-12_0.02.png
-
 CSV output (raman_<parent>_<E>.csv) includes metadata comment lines:
     # Formula: Na3PS4
     # Dopants: Ca(x=0.06)/Cl(x=0.12)
     # E_field: 0.02
     # Composition: 06-12
-
-    These are parsed by compare_raman.py for automatic labels and titles.
 
 Title convention for <parent> = "06-12":
     All-digit tokens split by '-' or '_' are interpreted as doping levels × 100.
@@ -64,11 +65,11 @@ Title convention for <parent> = "06-12":
 Dependencies: argparse, pathlib, re, numpy, pymatgen, plot_raman
 
 Usage:
-    python RASCBEC_phonopy.py                      # all defaults
-    python RASCBEC_phonopy.py --E 0.02 --gamma 15
-    python RASCBEC_phonopy.py --no-plot
-    python RASCBEC_phonopy.py --freq-min 50 --freq-max 600
-    python RASCBEC_phonopy.py --help
+    python RASCBEC_VASP.py                      # all defaults
+    python RASCBEC_VASP.py --E 0.02 --gamma 15
+    python RASCBEC_VASP.py --no-plot
+    python RASCBEC_VASP.py --freq-min 50 --freq-max 600
+    python RASCBEC_VASP.py --help
 """
 
 import argparse
@@ -76,7 +77,7 @@ import re
 from pathlib import Path
 
 import numpy as np
-from pymatgen.core import Element, Composition
+from pymatgen.core import Element
 
 from plot_raman import plot_raman_spectrum
 
@@ -85,8 +86,10 @@ from plot_raman import plot_raman_spectrum
 # Physical constants
 # ---------------------------------------------------------------------------
 
-THZCM1  = 33.3564095198     # THz → cm-1
-THZMEV  = 4.13566553853599  # THz → meV
+# VASP frequencies are in cm-1 — no THz conversion needed.
+# cm-1 → meV: use high-precision ratio of CODATA THz conversion factors.
+CM1MEV  = 4.13566553853599 / 33.3564095198  # 0.12398419843 meV per cm-1
+
 EPS0    = 55.2635e-4        # ε₀ in e² / (eV·Å)
 KB_T    = 8.617333e-2 * 298 # k_B T at 298 K, meV
 
@@ -114,7 +117,7 @@ OUTCAR_MAP = {
 def parse_args():
     """Return parsed CLI arguments."""
     p = argparse.ArgumentParser(
-        description='RASCBEC Raman activity calculator (phonopy eigvecs).')
+        description='RASCBEC Raman activity calculator (VASP DFPT eigvecs).')
     p.add_argument('--E', type=float, default=0.02,
                    help='EFIELD_PEAD strength in eV/Ang (default: 0.02)')
     p.add_argument('--gamma', type=float, default=10.0,
@@ -153,10 +156,10 @@ def structure_info(poscar='POSCAR'):
     -------
     vol          : float   — unit-cell volume (Å³)
     species_n    : ndarray — atom counts per species, shape (ntype,)
-    atomic_mass  : list    — atomic masses (amu) per species, auto-looked up
+    atomic_mass  : list    — atomic masses (amu) per species (for reference/title)
     ntype        : int     — number of species
     nat          : int     — total number of atoms
-    modes        : int     — 3*nat (maximum phonon mode count)
+    modes        : int     — 3*nat (total phonon mode count)
     species_names: list    — element symbol strings
     """
     with open(poscar, 'r') as f:
@@ -172,7 +175,7 @@ def structure_info(poscar='POSCAR'):
     print(f"Species : {species_names}")
     print(f"Counts  : {species_n.tolist()}")
     print(f"Masses  : {[round(m, 4) for m in atomic_mass]} (amu, via pymatgen)")
-    print(f"Atoms   : {nat} | Max modes: {modes}")
+    print(f"Atoms   : {nat} | Modes: {modes}")
     return vol, species_n, atomic_mass, ntype, nat, modes, species_names
 
 
@@ -301,59 +304,63 @@ def build_charge_derivatives(charges, nat, E):
 
 
 # ===========================================================================
-# V.  Phonon data loader
+# V.  VASP phonon data loader
 # ===========================================================================
 
-def load_phonon_data(freqs_file='freqs_phonopy.dat',
-                     eigvecs_file='eigvecs_phonopy.dat',
-                     modes_max=None):
+def load_vasp_phonon_data(freqs_file='freqs_vasp.dat',
+                          eigvecs_file='eigvecs_vasp.dat',
+                          modes_max=None):
     """
-    Load phonon frequencies and eigenvectors from phonopy output files.
+    Load VASP DFPT phonon frequencies and eigenvectors.
+
+    VASP-specific notes:
+      - Frequencies are already in cm-1 (no THz conversion applied).
+      - Eigenvectors are already mass-normalised by VASP; do NOT divide
+        by sqrt(mass) again in the Raman loop.
+      - All 3N modes are typically present (no acoustic filtering).
 
     Parameters
     ----------
-    freqs_file   : str — path to frequency file, shape (N_modes,), unit THz
-    eigvecs_file : str — path to eigenvector file, shape (3N × N_modes)
+    freqs_file   : str — path to frequency file, shape (3N,), unit cm-1
+    eigvecs_file : str — path to eigenvector file, shape (3N × 3N)
     modes_max    : int — 3*nat, used only for the log message
 
     Returns
     -------
-    eigvals : ndarray (N_modes,)   — frequencies in cm-1
+    eigvals : ndarray (N_modes,)   — frequencies in cm-1  (unchanged)
     hws     : ndarray (N_modes,)   — frequencies in meV
     eigvecs : ndarray (3N, N_modes)
     n_modes : int
     """
-    freqs   = np.loadtxt(freqs_file)    # THz
-    eigvecs = np.loadtxt(eigvecs_file)  # dimensionless displacement
+    freqs   = np.loadtxt(freqs_file)    # cm-1  (already converted by VASP)
+    eigvecs = np.loadtxt(eigvecs_file)  # mass-normalised displacement
     n_modes = eigvecs.shape[1]
 
     assert len(freqs) == n_modes, (
         f"freqs has {len(freqs)} entries but eigvecs has {n_modes} columns!")
 
     if modes_max is not None:
-        print(f"Retained modes: {n_modes} / {modes_max} "
-              f"(removed {modes_max - n_modes} imaginary/acoustic modes)")
+        print(f"Modes loaded: {n_modes} / {modes_max}")
 
-    eigvals = freqs * THZCM1   # THz → cm-1
-    hws     = freqs * THZMEV   # THz → meV
+    eigvals = freqs             # cm-1 — no conversion needed
+    hws     = freqs * CM1MEV   # cm-1 → meV
     return eigvals, hws, eigvecs, n_modes
 
 
 # ===========================================================================
-# VI.  Raman activity calculator
+# VI.  Raman activity calculator  (VASP: eigenvectors already mass-normalised)
 # ===========================================================================
 
-def compute_raman_activities(dq, eigvecs, nat, n_modes, atomic_mass, species_n):
+def compute_raman_activities(dq, eigvecs, nat, n_modes):
     """
     Compute the Raman scattering activity for each phonon mode.
 
-    Phonopy eigenvectors are NOT mass-normalised; division by sqrt(mass)
-    is applied here.
+    VASP eigenvectors are already mass-normalised — no /sqrt(mass) is applied.
 
     Implements Eqs. 7–8 of Zhang et al. (2025):
       Eq. 7  — Raman tensor contribution per atom:
                act[i,j,k] = dq_t[i,k,j] * e_t[i]
-               where e_t = mass-normalised eigenvector component for atom t
+               where e_t = eigenvector component for atom t (mass-normalised by VASP)
       Eq. 8  — Raman scattering activity:
                A_s = 45·ᾱ² + 7·β²
                ᾱ  = (R_xx + R_yy + R_zz) / 3          (mean polarizability derivative)
@@ -362,25 +369,20 @@ def compute_raman_activities(dq, eigvecs, nat, n_modes, atomic_mass, species_n):
 
     Parameters
     ----------
-    dq          : list[ndarray(3,3,3)]  — per-atom BEC derivative tensors
-    eigvecs     : ndarray (3N, N_modes) — phonopy eigenvectors (not mass-normalised)
-    nat         : int
-    n_modes     : int
-    atomic_mass : list[float]           — mass per species (amu)
-    species_n   : ndarray               — atom count per species
+    dq      : list[ndarray(3,3,3)]  — per-atom BEC derivative tensors
+    eigvecs : ndarray (3N, N_modes) — VASP mass-normalised eigenvectors
+    nat     : int
+    n_modes : int
 
     Returns
     -------
     activity : list[float]  — Raman activity per mode, length n_modes
     """
-    mass_list = np.repeat(atomic_mass, species_n.astype(int))  # (nat,)
-    mass_T    = np.tile(mass_list, (3, 1)).T                   # (nat, 3)
-
     activity = [0.0] * n_modes
 
     for s in range(n_modes):
-        # Mass-normalise phonopy eigenvector for mode s, shape (nat, 3)
-        eigvec = eigvecs[:, s].reshape((nat, 3)) / np.sqrt(mass_T)
+        # VASP eigenvectors are already mass-normalised; use directly
+        eigvec = eigvecs[:, s].reshape((nat, 3))
 
         # Accumulate polarizability tensor over all atoms
         ra_tot = np.zeros((3, 3))
@@ -420,13 +422,19 @@ def compute_raman_activities(dq, eigvecs, nat, n_modes, atomic_mass, species_n):
 def write_csv(out_csv, eigvals, activity, formula='', dopants='',
               composition='', E=None):
     """
-    Write Raman data to CSV with metadata comment header.
+    Write mode index, frequency (cm-1), and Raman activity to a CSV file with metadata comment header.
+
+    Parameters
+    ----------
+    out_csv  : str             — output file path
+    eigvals  : ndarray (N,)   — frequencies in cm-1
+    activity : list[float]    — Raman activities, length N
 
     Header lines (parsed by compare_raman.py):
       # Formula:      e.g. Na3PS4
       # Dopants:      e.g. Ca(x=0.06)/Cl(x=0.12)   (omitted if undoped)
       # E_field:      e.g. 0.02
-      # Composition:  e.g. 06-12   (parent directory tag)
+      # Composition:  e.g. 06-12
       # Mode,Freq_cm-1,Activity
     """
     with open(out_csv, 'w') as fh:
@@ -456,14 +464,6 @@ def parse_doping_fractions(parent_name):
       '06-12'      → [0.06, 0.12]
       'run_06_12'  → [0.06, 0.12]  (non-digit tokens are ignored)
       '10'         → [0.10]        (single dopant)
-
-    Parameters
-    ----------
-    parent_name : str — e.g. '06-12'
-
-    Returns
-    -------
-    fracs : list[float]
     """
     tokens = re.split(r'[-_]', parent_name)
     return [int(t) / 100.0 for t in tokens if re.fullmatch(r'\d+', t)]
@@ -474,20 +474,7 @@ def identify_dopants(species_names, species_n, threshold=DOPANT_THRESHOLD):
     Classify species as host or dopant by their fractional count in the supercell.
 
     Species whose fraction of total atoms < threshold are dopants.
-    Default threshold = DOPANT_THRESHOLD (0.05), i.e. < 5 % of atoms.
-
-    Parameters
-    ----------
-    species_names : list[str]
-    species_n     : ndarray of ints
-    threshold     : float
-
-    Returns
-    -------
-    host_names   : list[str]
-    host_n       : list[int]
-    dopant_names : list[str]
-    dopant_n     : list[int]
+    Default threshold = DOPANT_THRESHOLD (0.05), i.e. < 5% of atoms.
     """
     total = float(sum(species_n))
     host_names, host_n, dopant_names, dopant_n = [], [], [], []
@@ -504,28 +491,14 @@ def approximate_host_formula(host_names, host_n):
     Recover the ideal host formula despite doping-shifted stoichiometry.
 
     Strategy: divide all host counts by the smallest host count and round
-    to the nearest integer.  This works because the least-abundant host
-    species (e.g. P in Na3PS4, or Ti in BaTiO3) is the one with
-    stoichiometric coefficient 1 and is typically undoped.
+    to the nearest integer.  Works because the least-abundant host species
+    (e.g. P in Na3PS4) typically has stoichiometric coefficient 1.
 
     Examples
     --------
     Na23 P8 S28  (Na3PS4, 1 Ca + 4 Cl dopants) → Na3PS4  ✓
     Na24 P8 S32  (undoped Na3PS4 supercell)     → Na3PS4  ✓
     Ba8  Ti8 O24 (undoped BaTiO3 supercell)     → BaTiO3  ✓
-
-    Limitation: for very heavy doping (> ~25 %) or when the reference
-    species is itself doped, the result may deviate.  In that case,
-    inspect and override manually via --out-csv / title argument.
-
-    Parameters
-    ----------
-    host_names : list[str]
-    host_n     : list[int]
-
-    Returns
-    -------
-    formula : str  — e.g. 'Na3PS4'
     """
     min_n  = min(host_n)
     ratios = [max(1, round(n / min_n)) for n in host_n]
@@ -533,14 +506,6 @@ def approximate_host_formula(host_names, host_n):
 
 
 def build_csv_metadata(species_names, species_n, parent_name, E):
-    """
-    Compute formula, dopants string, and composition tag for the CSV header.
-
-    Returns
-    -------
-    formula     : str  e.g. 'Na3PS4'
-    dopants_str : str  e.g. 'Ca(x=0.06)/Cl(x=0.12)'  ('' if undoped)
-    """
     fracs = parse_doping_fractions(parent_name)
     host_names, host_n, dopant_names, _ = identify_dopants(species_names, species_n)
     formula = approximate_host_formula(host_names, host_n)
@@ -554,11 +519,13 @@ def build_csv_metadata(species_names, species_n, parent_name, E):
 
 
 def build_plot_title(formula, dopants_str, E, gamma):
-    """Build the plot title from pre-computed formula/dopants strings."""
-    if dopants_str:
-        chem_part = f"{formula} [{dopants_str} doped]"
-    else:
-        chem_part = formula
+    """
+    Construct an informative, fully dynamic plot title.
+
+    Title format:
+      <host_formula> [<dopant>(x=<frac>) / ...  doped]  |  E = <E> eV/Å  |  FWHM = <gamma> cm⁻¹
+    """
+    chem_part = f"{formula} [{dopants_str} doped]" if dopants_str else formula
     return f"{chem_part}  |  E = {E} eV/Å  |  FWHM = {gamma} cm$^{{-1}}$"
 
 
@@ -573,7 +540,7 @@ def main():
     out_csv = args.out_csv or f"raman_{parent_name}_{args.E:g}.csv"
     out_png = args.out_png or f"raman_{parent_name}_{args.E:g}.png"
 
-    print(f"\n=== RASCBEC (phonopy)  |  tag: {parent_name}  |  E = {args.E:g} eV/Å ===\n")
+    print(f"\n=== RASCBEC (VASP)  |  tag: {parent_name}  |  E = {args.E:g} eV/Å ===\n")
 
     # 1. Structure
     vol, species_n, atomic_mass, ntype, nat, modes, species_names = structure_info('POSCAR')
@@ -586,13 +553,13 @@ def main():
     dq = build_charge_derivatives(charges, nat, args.E)
 
     # 4. Phonon data
-    print("\nLoading phonon data ...")
-    eigvals, hws, eigvecs, n_modes = load_phonon_data(
-        'freqs_phonopy.dat', 'eigvecs_phonopy.dat', modes_max=modes)
+    print("\nLoading VASP phonon data ...")
+    eigvals, hws, eigvecs, n_modes = load_vasp_phonon_data(
+        'freqs_vasp.dat', 'eigvecs_vasp.dat', modes_max=modes)
 
     # 5. Raman activities
     print("\nComputing Raman activities ...")
-    activity = compute_raman_activities(dq, eigvecs, nat, n_modes, atomic_mass, species_n)
+    activity = compute_raman_activities(dq, eigvecs, nat, n_modes)
 
     # 6. Build metadata and write CSV
     formula, dopants_str = build_csv_metadata(species_names, species_n, parent_name, args.E)
