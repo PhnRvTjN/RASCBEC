@@ -1,100 +1,240 @@
-# RASCBEC
+# RASCBEC — Raman Spectroscopy Calculation via Born Effective Charge
 
-RAman Spectroscopy Calculation via Born Effective Charge
+> **This is a community fork** of the original
+> [RASCBEC](https://github.com/RZhang05/RASCBEC) by Rui Zhang et al.
+> The underlying physics and RASCBEC method are unchanged. This fork
+> refactors the scripts for practical use on large doped supercells, adds a
+> complete plotting pipeline, and introduces a multi-composition comparison
+> tool.
 
-# Overview of RASCBEC Method
+---
 
-This method calculates Raman activities based on Born Effective Charge (BEC) data, following phonon calculations. Two separate scripts are provided depending on how the phonon modes were obtained:
+## Improvements Over the Original
 
-- RASCBEC_vasp.py: for phonon data generated directly by VASP
-- RASCBEC_phonopy.py: for phonon data generated using phonopy
+| Feature | Original | This Fork |
+|---|---|---|
+| Atomic masses | Hardcoded arrays | Auto-lookup via **pymatgen** |
+| OUTCAR layout | Flat files (`OUTCAR1`, `OUTCARm1`, …) | Subdirectory layout (`./1/OUTCAR`, `./m1/OUTCAR`, …) |
+| Mode count | Fixed `3N` | Variable — filtered imaginary / acoustic modes handled |
+| Output filename | `raman_phonopy.dat` / `raman_vasp.dat` | `raman_<composition>_<E>.csv` (E-field encoded) |
+| CSV metadata | None | Header lines: `# Formula`, `# Dopants`, `# E_field`, `# Composition` |
+| Plot generation | Not included | Integrated via `plot_raman.py` (Lorentzian broadening, peak labels, auto title) |
+| Comparison plots | Not included | `compare_raman.py` — waterfall / overlaid, absolute or normalised |
+| CLI arguments | None | `--E`, `--gamma`, `--freq-min/max`, `--no-plot`, `--out-csv/png`, … |
+| Code structure | Single monolithic script | Modular functions (BEC reader, derivative builder, activity calculator, writer) |
 
-# Workflow Steps
+---
 
-- Rotation of Structures
+## Dependencies
 
-Use the script rotate.py to generate rotated POSCAR files along ±x, ±y, and ±z directions.
+```
+python >= 3.8
+numpy
+scipy
+matplotlib
+pymatgen
+```
 
-This prepares the necessary configurations for BEC calculations.
+Install all at once:
+```bash
+pip install numpy scipy matplotlib pymatgen
+```
 
-- Born Effective Charge (BEC) Calculations
+---
 
-Perform 8 separate VASP calculations using the rotated structures.
+## Repository Structure
 
-Extract the BEC tensors from each OUTCAR file.
+```
+RASCBEC/
+├── rotate.py            — Rotate POSCAR for ±x/y/z E-field directions
+├── RASCBEC_phonopy.py   — Raman activities using phonopy eigenvectors (refactored)
+├── RASCBEC_VASP.py      — Raman activities using VASP DFPT eigenvectors (refactored)
+├── plot_raman.py        — Single-composition Raman spectrum plotter
+├── compare_raman.py     — Multi-composition / multi-E-field comparison plotter
+├── RASCBEC_vasp.py      — Original upstream script (preserved for reference)
+├── Code/                — Original upstream scripts
+└── Example/             — GeO2 rutile example inputs and outputs
+```
 
-- Raman Activity Computation
-Run RASCBEC_vasp.py if phonons were computed via VASP.
+> `RASCBEC_phonopy.py` and `RASCBEC_VASP.py` (uppercase) are the improved
+> scripts in this fork. `RASCBEC_vasp.py` (lowercase) is the unmodified
+> original kept for reference.
 
-Run RASCBEC_phonopy.py if phonons were computed via phonopy.
+---
 
-These scripts will combine phonon frequencies and eigenvectors with the BEC derivatives to compute Raman activities.
+## Workflow
 
-# Detailed Description of Each Script
+### 1 — Rotate POSCAR
 
-## rotate.py (POSCAR Rotation and Transformation Script)
+```bash
+python rotate.py
+```
 
-This script reads a VASP POSCAR file, applies specific rotational transformations to the atomic positions and lattice vectors, and outputs modified POSCAR files for three directions of applied electric fields: along the x, y, and z axes.
+Generates `ex.POSCAR.vasp`, `ey.POSCAR.vasp`, `ez.POSCAR.vasp` for
+electric-field directions along ±x, ±y, ±z.
 
-- Input
+### 2 — Run 8 BEC Calculations
 
-POSCAR file: A VASP-formatted file named POSCAR which contains:
-(1) Lattice vector information.
-(2) Atom types and their quantities.
-(3) Atomic positions.
+Organise VASP calculations in subdirectories.
+The scripts expect the following layout in your working directory:
 
-- Output
+```
+9-RASCBEC/
+├── POSCAR
+├── freqs_phonopy.dat      (or freqs_vasp.dat)
+├── eigvecs_phonopy.dat    (or eigvecs_vasp.dat)
+├── 1/OUTCAR              — E-field along +z (unrotated)
+├── m1/OUTCAR             — E-field along −z (unrotated)
+├── x/OUTCAR              — E-field along +x (rotated)
+├── mx/OUTCAR             — E-field along −x
+├── y/OUTCAR              — E-field along +y (rotated)
+├── my/OUTCAR             — E-field along −y
+├── z/OUTCAR              — E-field along +z (rotated)
+└── mz/OUTCAR             — E-field along −z
+```
 
-Three VASP POSCAR-format files:
-(1) ex.POSCAR.vasp: Adjusted for electric field along the x-axis.
-(2) ey.POSCAR.vasp: Adjusted for electric field along the y-axis.
-(3) ez.POSCAR.vasp: Adjusted for electric field along the z-axis.
-Each file includes the rotated lattice vectors and atomic positions.
+### 3 — Compute Raman Activities
 
-## RASCBEC_vasp.py (Calculation of Raman Activities from VASP Output Files)
- 
-This script reads input files generated from VASP simulations 
-to calculate Raman activities for each phonon mode using RASCBEC method.
+**Phonopy eigenvectors** (frequencies in THz, un-mass-normalised):
+```bash
+python RASCBEC_phonopy.py
+python RASCBEC_phonopy.py --E 0.02 --gamma 15 --freq-min 50 --freq-max 600
+```
 
-- Input
+**VASP DFPT eigenvectors** (frequencies in cm⁻¹, already mass-normalised):
+```bash
+python RASCBEC_VASP.py
+python RASCBEC_VASP.py --E 0.02 --gamma 15 --no-plot
+```
 
-(1) A POSCAR file (structure information).
-(2) Eight OUTCAR files (OUTCAR1, OUTCARm1, OUTCARx, OUTCARmx, OUTCARy, OUTCARmy, OUTCARz, OUTCARmz) containing Born Effective Charge data.
-(3) Two additional phonon property files:
-    - freqs_vasp.dat: Phonon frequencies stored as a 3N×1 array, where N is the number of atoms.
-    - eigvecs_vasp.dat: Phonon eigenvectors stored as a 3N×3N array.
+> **Key distinction:** VASP eigenvectors are already mass-normalised by
+> VASP. `RASCBEC_VASP.py` does *not* divide by √(mass), whereas
+> `RASCBEC_phonopy.py` does. Using the wrong script with the wrong
+> eigenvector type will give incorrect Raman intensities.
 
-- Output:
+Output (run from `.../06-12/9-RASCBEC/` with `--E 0.02`):
+```
+raman_06-12_0.02.csv
+raman_06-12_0.02.png
+```
 
-raman_vasp.dat:
-A file containing the calculated Raman activities for each phonon mode.
+### 4 — Plot a Single Spectrum
 
-## RASCBEC_phonopy.py
+`plot_raman.py` is used internally by both RASCBEC scripts but can also
+be called standalone:
 
-Similar to RASCBEC_vasp but requiring freqs_phonopy.dat and eigvecs_phonopy.dat
+```bash
+python plot_raman.py --dat raman_06-12_0.02.csv --gamma 10 --freq-min 0 --freq-max 600
+```
 
+### 5 — Compare Multiple Compositions
 
-# Example Case: Rutile GeO2
+```bash
+# Waterfall (auto applies --normalize-each, 10 peak labels per spectrum)
+python compare_raman.py raman_*.csv --offset 1.2
 
-In this example, we demonstrate the full Raman activity calculation workflow using rutile GeO2, which contains 6 atoms per unit cell.
+# Global normalisation waterfall
+python compare_raman.py raman_*.csv --normalize --offset 1.2
 
-All necessary input and output files are provided in the example folder:
+# Overlaid, absolute scale (no labels)
+python compare_raman.py raman_*.csv
 
-## Input Files:
-- POSCAR — structure of rutile GeO2
-- OUTCAR1, OUTCARm1, OUTCARx, OUTCARmx, OUTCARy, OUTCARmy, OUTCARz, OUTCARmz — BEC calculations for 8 rotated structures
-- freqs_vasp.dat — phonon frequencies in a 18×1 array format (N = 6) got from VASP
-- eigvecs_vasp.dat — phonon eigenvectors in a 18×18 array got from VASP
-- freqs_phonopy.dat — phonon frequencies in a 18×1 array format (N = 6) got from phonopy
-- eigvecs_phonopy.dat — phonon eigenvectors in a 18×18 array got from phonopy
+# Same composition, different E-field (E auto-appended to legend)
+python compare_raman.py raman_06-12_0.01.csv raman_06-12_0.02.csv raman_06-12_0.05.csv --offset 1.2
 
-## Output Files:
-- raman_vasp.dat — computed Raman activities for each phonon mode for phonon data generated directly by VASP
-- raman_phonopy.dat — computed Raman activities for each phonon mode for phonon data generated using phonopy
+# Custom labels / output name
+python compare_raman.py raman_*.csv --offset 1.2 --labels "Undoped" "Ca-doped" "Ca/Cl-doped" --out fig1.png
+```
 
-This example can be used as a reference for setting up and validating your own Raman activity calculations.
+Auto-generated output filename encodes the run parameters:
+```
+raman_compare_Na3PS4_enorm.png   # per-spectrum normalised waterfall
+raman_compare_Na3PS4_gnorm.png   # global normalised waterfall
+raman_compare_Na3PS4_abs.png     # absolute overlaid
+```
 
+---
 
-# Please cite the following paper: 
-Zhang, Rui, et al. "RASCBEC: Raman spectroscopy calculation via born effective charge." Computer Physics Communications 307 (2025): 109425
+## CLI Reference
 
+### `RASCBEC_phonopy.py` / `RASCBEC_VASP.py`
+
+| Argument | Default | Description |
+|---|---|---|
+| `--E` | `0.02` | EFIELD_PEAD value used in BEC calculations (eV/Å) |
+| `--gamma` | `10.0` | Lorentzian FWHM for broadening (cm⁻¹) |
+| `--freq-min` | `0.0` | Lower plot x-limit (cm⁻¹) |
+| `--freq-max` | auto | Upper plot x-limit (cm⁻¹) |
+| `--no-plot` | — | Skip PNG generation |
+| `--no-sticks` | — | Hide stick spectrum in plot |
+| `--n-labels` | `20` | Number of peak frequency labels |
+| `--out-csv` | auto | Override output CSV name |
+| `--out-png` | auto | Override output PNG name |
+
+### `compare_raman.py`
+
+| Argument | Default | Description |
+|---|---|---|
+| `--gamma` | `10.0` | Lorentzian FWHM (cm⁻¹) |
+| `--freq-min/max` | `0` / auto | Plot x-axis range |
+| `--normalize` | — | Normalise all to global maximum |
+| `--normalize-each` | auto with `--offset` | Normalise each to its own maximum |
+| `--offset` | `0.0` | Vertical offset per spectrum (waterfall); auto-applies `--normalize-each` |
+| `--sticks` | — | Show stick spectrum |
+| `--n-labels` | `10` | Peak labels per spectrum (waterfall only) |
+| `--labels` | auto | Override legend labels |
+| `--out` | auto | Output PNG name |
+
+---
+
+## Output CSV Format
+
+Every CSV produced by the RASCBEC scripts includes a metadata header:
+
+```
+# Formula: Na3PS4
+# Dopants: Ca(x=0.06)/Cl(x=0.12)
+# E_field: 0.02
+# Composition: 06-12
+# Mode,Freq_cm-1,Activity
+0001,83.672345,148.546403
+0002,91.234567,0.001234
+...
+```
+
+The `#`-prefixed lines are skipped by `numpy.loadtxt` and other standard
+readers. `compare_raman.py` parses them to auto-build legend labels and
+figure titles.
+
+---
+
+## Example: Rutile GeO₂
+
+Input files are in the `Example/` folder. Run:
+
+```bash
+cd Example
+python ../RASCBEC_VASP.py     # uses freqs_vasp.dat + eigvecs_vasp.dat
+python ../RASCBEC_phonopy.py  # uses freqs_phonopy.dat + eigvecs_phonopy.dat
+```
+
+Expected outputs:
+- `raman_Example_0.02.csv`
+- `raman_Example_0.02.png`
+
+---
+
+## Citation
+
+If you use this software, please cite the original RASCBEC paper:
+
+```
+Zhang, Rui, et al. "RASCBEC: Raman spectroscopy calculation via born
+effective charge." Computer Physics Communications 307 (2025): 109425.
+https://doi.org/10.1016/j.cpc.2024.109425
+```
+
+---
+
+*Fork maintained by [PhnRvTjN](https://github.com/PhnRvTjN).
+Original repository: [RZhang05/RASCBEC](https://github.com/RZhang05/RASCBEC).*
