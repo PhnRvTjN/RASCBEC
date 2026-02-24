@@ -1,4 +1,4 @@
-# RASCBEC — Raman Spectroscopy Calculation via Born Effective Charge
+# RASCBEC - Raman Spectroscopy Calculation via Born Effective Charge
 
 > **This is a community fork** of the original
 > [RASCBEC](https://github.com/RZhang05/RASCBEC) by Rui Zhang et al.
@@ -15,11 +15,11 @@
 |---|---|---|
 | Atomic masses | Hardcoded arrays | Auto-lookup via **pymatgen** |
 | OUTCAR layout | Flat files (`OUTCAR1`, `OUTCARm1`, …) | Subdirectory layout (`./1/OUTCAR`, `./m1/OUTCAR`, …) |
-| Mode count | Fixed `3N` | Variable — filtered imaginary / acoustic modes handled |
+| Mode count | Fixed `3N` | Variable - filtered imaginary / acoustic modes handled |
 | Output filename | `raman_phonopy.dat` / `raman_vasp.dat` | `raman_<composition>_<E>.csv` (E-field encoded) |
 | CSV metadata | None | Header lines: `# Formula`, `# Dopants`, `# E_field`, `# Composition` |
 | Plot generation | Not included | Integrated via `plot_raman.py` (Lorentzian broadening, peak labels, auto title) |
-| Comparison plots | Not included | `compare_raman.py` — waterfall / overlaid, absolute or normalised |
+| Comparison plots | Not included | `compare_raman.py` - waterfall / overlaid, absolute or normalised |
 | CLI arguments | None | `--E`, `--gamma`, `--freq-min/max`, `--no-plot`, `--out-csv/png`, … |
 | Code structure | Single monolithic script | Modular functions (BEC reader, derivative builder, activity calculator, writer) |
 
@@ -46,14 +46,14 @@ pip install numpy scipy matplotlib pymatgen
 
 ```
 RASCBEC/
-├── rotate.py            — Rotate POSCAR for ±x/y/z E-field directions
-├── RASCBEC_phonopy.py   — Raman activities using phonopy eigenvectors (refactored)
-├── RASCBEC_VASP.py      — Raman activities using VASP DFPT eigenvectors (refactored)
-├── plot_raman.py        — Single-composition Raman spectrum plotter
-├── compare_raman.py     — Multi-composition / multi-E-field comparison plotter
-├── RASCBEC_vasp.py      — Original upstream script (preserved for reference)
-├── Code/                — Original upstream scripts
-└── Example/             — GeO2 rutile example inputs and outputs
+├── rotate.py            - Rotate POSCAR for ±x/y/z E-field directions
+├── RASCBEC_phonopy.py   - Raman activities using phonopy eigenvectors (refactored)
+├── RASCBEC_VASP.py      - Raman activities using VASP DFPT eigenvectors (refactored)
+├── plot_raman.py        - Single-composition Raman spectrum plotter
+├── compare_raman.py     - Multi-composition / multi-E-field comparison plotter
+├── RASCBEC_vasp.py      - Original upstream script (preserved for reference)
+├── Code/                - Original upstream scripts
+└── Example/             - GeO2 rutile example inputs and outputs
 ```
 
 > `RASCBEC_phonopy.py` and `RASCBEC_VASP.py` (uppercase) are the improved
@@ -64,7 +64,7 @@ RASCBEC/
 
 ## Workflow
 
-### 1 — Rotate POSCAR
+### 1 - Rotate POSCAR
 
 ```bash
 python rotate.py
@@ -73,7 +73,7 @@ python rotate.py
 Generates `ex.POSCAR.vasp`, `ey.POSCAR.vasp`, `ez.POSCAR.vasp` for
 electric-field directions along ±x, ±y, ±z.
 
-### 2 — Run 8 BEC Calculations
+### 2 - Run 8 BEC Calculations
 
 Organise VASP calculations in subdirectories.
 The scripts expect the following layout in your working directory:
@@ -83,17 +83,17 @@ The scripts expect the following layout in your working directory:
 ├── POSCAR
 ├── freqs_phonopy.dat      (or freqs_vasp.dat)
 ├── eigvecs_phonopy.dat    (or eigvecs_vasp.dat)
-├── 1/OUTCAR              — E-field along +z (unrotated)
-├── m1/OUTCAR             — E-field along −z (unrotated)
-├── x/OUTCAR              — E-field along +x (rotated)
-├── mx/OUTCAR             — E-field along −x
-├── y/OUTCAR              — E-field along +y (rotated)
-├── my/OUTCAR             — E-field along −y
-├── z/OUTCAR              — E-field along +z (rotated)
-└── mz/OUTCAR             — E-field along −z
+├── 1/OUTCAR              - E-field along +z (unrotated)
+├── m1/OUTCAR             - E-field along −z (unrotated)
+├── x/OUTCAR              - E-field along +x (rotated)
+├── mx/OUTCAR             - E-field along −x
+├── y/OUTCAR              - E-field along +y (rotated)
+├── my/OUTCAR             - E-field along −y
+├── z/OUTCAR              - E-field along +z (rotated)
+└── mz/OUTCAR             - E-field along −z
 ```
 
-### 3 — Compute Raman Activities
+### 3 - Compute Raman Activities
 
 **Phonopy eigenvectors** (frequencies in THz, un-mass-normalised):
 ```bash
@@ -118,7 +118,7 @@ raman_06-12_0.02.csv
 raman_06-12_0.02.png
 ```
 
-### 4 — Plot a Single Spectrum
+### 4 - Plot a Single Spectrum
 
 `plot_raman.py` is used internally by both RASCBEC scripts but can also
 be called standalone:
@@ -127,7 +127,7 @@ be called standalone:
 python plot_raman.py --dat raman_06-12_0.02.csv --gamma 10 --freq-min 0 --freq-max 600
 ```
 
-### 5 — Compare Multiple Compositions
+### 5 - Compare Multiple Compositions
 
 ```bash
 # Waterfall (auto applies --normalize-each, 10 peak labels per spectrum)
@@ -165,8 +165,8 @@ raman_compare_Na3PS4_abs.png     # absolute overlaid
 | `--gamma` | `10.0` | Lorentzian FWHM for broadening (cm⁻¹) |
 | `--freq-min` | `0.0` | Lower plot x-limit (cm⁻¹) |
 | `--freq-max` | auto | Upper plot x-limit (cm⁻¹) |
-| `--no-plot` | — | Skip PNG generation |
-| `--no-sticks` | — | Hide stick spectrum in plot |
+| `--no-plot` | - | Skip PNG generation |
+| `--no-sticks` | - | Hide stick spectrum in plot |
 | `--n-labels` | `20` | Number of peak frequency labels |
 | `--out-csv` | auto | Override output CSV name |
 | `--out-png` | auto | Override output PNG name |
@@ -177,10 +177,10 @@ raman_compare_Na3PS4_abs.png     # absolute overlaid
 |---|---|---|
 | `--gamma` | `10.0` | Lorentzian FWHM (cm⁻¹) |
 | `--freq-min/max` | `0` / auto | Plot x-axis range |
-| `--normalize` | — | Normalise all to global maximum |
+| `--normalize` | - | Normalise all to global maximum |
 | `--normalize-each` | auto with `--offset` | Normalise each to its own maximum |
 | `--offset` | `0.0` | Vertical offset per spectrum (waterfall); auto-applies `--normalize-each` |
-| `--sticks` | — | Show stick spectrum |
+| `--sticks` | - | Show stick spectrum |
 | `--n-labels` | `10` | Peak labels per spectrum (waterfall only) |
 | `--labels` | auto | Override legend labels |
 | `--out` | auto | Output PNG name |
