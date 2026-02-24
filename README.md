@@ -83,8 +83,8 @@ The scripts expect the following layout in your working directory:
 ├── POSCAR
 ├── freqs_phonopy.dat      (or freqs_vasp.dat)
 ├── eigvecs_phonopy.dat    (or eigvecs_vasp.dat)
-├── 1/OUTCAR              - E-field along +z (unrotated)
-├── m1/OUTCAR             - E-field along −z (unrotated)
+├── 1/OUTCAR              - E-field along + (unrotated)
+├── m1/OUTCAR             - E-field along − (unrotated)
 ├── x/OUTCAR              - E-field along +x (rotated)
 ├── mx/OUTCAR             - E-field along −x
 ├── y/OUTCAR              - E-field along +y (rotated)
