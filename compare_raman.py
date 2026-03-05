@@ -24,10 +24,9 @@ Comparing same composition at different E-fields
   The E-field is then omitted from the title (it lives in the legend instead).
 
 Legend labels and title are read from the CSV metadata header:
-  # Formula:     Na3PS4
-  # Dopants:     Ca(x=0.06)/Cl(x=0.12)
-  # E_field:     0.02
-  # Composition: 06-12
+  # Formula:  Na3PS4
+  # Dopants:  Ca(x=0.06)/Cl(x=0.12)
+  # E_field:  0.02
 
 Usage:
     # Overlaid absolute (no labels)
@@ -40,7 +39,10 @@ Usage:
     python compare_raman.py raman_*.csv --normalize --offset 1.2
 
     # Same composition, compare E-field strength
-    python compare_raman.py raman_06-12_0.01.csv raman_06-12_0.02.csv raman_06-12_0.05.csv --offset 1.2
+    python compare_raman.py raman_Na3PS4_E0.01.csv raman_Na3PS4_E0.02.csv raman_Na3PS4_E0.05.csv --offset 1.2
+
+    # Doped series
+    python compare_raman.py raman_Na3PS4_E0.02.csv raman_Na3PS4_Ca0.125_Cl0.5_E0.02.csv --offset 1.2
 
     # Finer control
     python compare_raman.py raman_*.csv --offset 1.2 --n-labels 5
@@ -95,21 +97,19 @@ def load_csv(filepath):
     Load a RASCBEC CSV.  Returns (freqs_cm1, activities, meta).
 
     Metadata parsed from comment lines (all default to '' if absent):
-      # Formula, # Dopants, # E_field, # Composition
+      # Formula, # Dopants, # E_field
     """
-    meta  = {'formula': '', 'dopants': '', 'e_field': '', 'composition': ''}
+    meta  = {'formula': '', 'dopants': '', 'e_field': ''}
     freqs, acts = [], []
     with open(filepath) as f:
         for line in f:
             s = line.strip()
             if   s.startswith('# Formula:'):
-                meta['formula']     = s.split(':', 1)[1].strip()
+                meta['formula'] = s.split(':', 1)[1].strip()
             elif s.startswith('# Dopants:'):
-                meta['dopants']     = s.split(':', 1)[1].strip()
+                meta['dopants'] = s.split(':', 1)[1].strip()
             elif s.startswith('# E_field:'):
-                meta['e_field']     = s.split(':', 1)[1].strip()
-            elif s.startswith('# Composition:'):
-                meta['composition'] = s.split(':', 1)[1].strip()
+                meta['e_field'] = s.split(':', 1)[1].strip()
             elif s.startswith('#') or not s:
                 continue
             else:
@@ -120,11 +120,25 @@ def load_csv(filepath):
 
 
 def filename_fallback(filepath):
-    """raman_06-12_0.02.csv  →  tag='06-12', efield='0.02'"""
-    stem  = Path(filepath).stem
+    """
+    Extract (chem_tag, efield) from a chemistry-based filename as a fallback
+    when the CSV metadata header is absent.
+
+    Examples
+    --------
+    raman_Na3PS4_E0.02.csv              -> ('Na3PS4',          '0.02')
+    raman_Na3PS4_Ca0.125_Cl0.5_E0.02.csv -> ('Na3PS4_Ca0.125_Cl0.5', '0.02')
+    """
+    stem  = Path(filepath).stem                          # e.g. raman_Na3PS4_E0.02
     inner = stem[6:] if stem.startswith('raman_') else stem
-    parts = inner.rsplit('_', 1)
-    return (parts[0], parts[1]) if len(parts) == 2 else (inner, '')
+    parts = inner.rsplit('_', 1)                         # split off last segment
+    if len(parts) == 2:
+        tag, last = parts
+        # Strip leading 'E' or 'e' from the field value if present
+        efield = last.lstrip('Ee') if last[:1].lower() == 'e' else ''
+        if efield:
+            return tag, efield
+    return inner, ''
 
 
 def chem_label(meta, filepath):
@@ -148,9 +162,9 @@ def build_legend_labels(all_meta, files):
     """
     Build legend labels with automatic E-field disambiguation.
 
-    - Different compositions, same E  → 'Na3PS4 [Ca(x=0.06)/Cl(x=0.12)]'  (E in title)
-    - Same composition, different E   → 'Na3PS4 [...] | E=0.02 eV/Å'       (E in legend)
-    - Both differ                     → 'Na3PS4 [...] | E=0.02 eV/Å'       (E in legend)
+    - Different compositions, same E  -> 'Na3PS4 [Ca(x=0.06)/Cl(x=0.12)]'  (E in title)
+    - Same composition, different E   -> 'Na3PS4 [...] | E=0.02 eV/Å'       (E in legend)
+    - Both differ                     -> 'Na3PS4 [...] | E=0.02 eV/Å'       (E in legend)
 
     Returns (legend_labels, efield_in_legend)
       efield_in_legend : bool — True means E is in the legend, not the title
@@ -246,7 +260,6 @@ def main():
         raise SystemExit("No input files found.")
 
     # ── Resolve normalisation mode ────────────────────────────────────────────
-    # --offset without an explicit norm flag → silently default to normalize-each
     waterfall_mode = args.offset > 0
     if waterfall_mode and not args.normalize and not args.normalize_each:
         args.normalize_each = True
@@ -303,7 +316,7 @@ def main():
     if args.title:
         title_parts = [args.title]
     else:
-        formulae = [m.get('formula', '') for m in all_meta]
+        formulae  = [m.get('formula', '') for m in all_meta]
         unique_f  = set(f for f in formulae if f)
         title_parts = [f"{list(unique_f)[0]} Raman Comparison"
                        if len(unique_f) == 1 else "Raman Spectra Comparison"]
