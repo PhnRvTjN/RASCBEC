@@ -3,18 +3,20 @@
 """
 Standalone Raman spectrum plotter for RASCBEC output.
 
-Also importable: from plot_raman import plot_raman_spectrum
+Also importable:
+    from plot_raman import plot_raman_spectrum
 
-Output naming:
-    When defaults are used, filenames are derived from the directory ONE level
-    above cwd.  Example: running from ~/calcs/06-12/9-RASCBEC uses "06-12".
+When called from RASCBEC_phonopy.py, dat_file and out_png are always passed
+explicitly and use chemistry-based names (e.g. raman_Na3PS4_Ca0.125_E0.02.csv).
+
+When run standalone, --dat must be provided; --out defaults to the same
+stem with .png extension.
 
 Usage:
-    python plot_raman.py                                    # all defaults
-    python plot_raman.py --gamma 15                         # wider broadening
-    python plot_raman.py --freq-min 50 --freq-max 600       # zoom window
-    python plot_raman.py --dat raman_06-12.csv --out compare.png
-    python plot_raman.py --no-sticks --n-labels 5
+    python plot_raman.py --dat raman_Na3PS4_Ca0.125_E0.02.csv
+    python plot_raman.py --dat raman_Na3PS4_E0.02.csv --gamma 15
+    python plot_raman.py --dat raman_Na3PS4_E0.02.csv --freq-min 50 --freq-max 600
+    python plot_raman.py --dat raman_Na3PS4_E0.02.csv --no-sticks --n-labels 5
     python plot_raman.py --help
 """
 
@@ -30,11 +32,11 @@ from scipy.signal import find_peaks
 
 
 def lorentzian(x, x0, A, gamma):
-    """Single Lorentzian peak: A*(gamma/2)^2 / ((x-x0)^2 + (gamma/2)^2)"""
+    """Single Lorentzian peak: A·(γ/2)² / ((x−x₀)² + (γ/2)²)"""
     return A * (gamma / 2)**2 / ((x - x0)**2 + (gamma / 2)**2)
 
 
-def plot_raman_spectrum(dat_file=None,
+def plot_raman_spectrum(dat_file,
                         out_png=None,
                         gamma=10.0,
                         freq_min=0.0,
@@ -43,26 +45,25 @@ def plot_raman_spectrum(dat_file=None,
                         n_labels=15,
                         title=None):
     """
-    Read a RASCBEC CSV output, apply Lorentzian broadening, save plot.
+    Read a RASCBEC CSV output, apply Lorentzian broadening, and save a plot.
+
+    The CSV is expected to have comment lines beginning with '#' (including
+    the metadata header written by RASCBEC_phonopy.py) followed by
+    comma-separated rows of: mode_index, freq_cm-1, activity.
 
     Parameters
     ----------
-    dat_file : str  Input CSV file (default: raman_<parent>.csv)
-    out_png  : str  Output PNG path (default: raman_<parent>.png)
-    gamma    : float  Lorentzian FWHM in cm-1 (default: 10.0)
-    freq_min : float  Lower x-axis limit in cm-1 (default: 0.0)
-    freq_max : float  Upper x-axis limit in cm-1 (default: auto)
-    sticks   : bool   Overlay stick spectrum (default: True)
-    n_labels : int    Number of peak labels to annotate (default: 15)
-    title    : str    Custom plot title (default: auto-generated from parent dir)
+    dat_file : str   — input CSV file path (required)
+    out_png  : str   — output PNG path (default: dat_file stem + .png)
+    gamma    : float — Lorentzian FWHM in cm⁻¹ (default: 10.0)
+    freq_min : float — lower x-axis limit in cm⁻¹ (default: 0.0)
+    freq_max : float — upper x-axis limit in cm⁻¹ (default: auto)
+    sticks   : bool  — overlay stick spectrum (default: True)
+    n_labels : int   — number of peak labels to annotate (default: 15)
+    title    : str   — plot title (default: CSV filename stem)
     """
-    # Resolve filenames from parent directory name if not explicitly given
-    parent_name = Path.cwd().parent.name
-    dat_file = dat_file or f"raman_{parent_name}.csv"
-    out_png  = out_png  or f"raman_{parent_name}.png"
+    out_png = out_png or Path(dat_file).with_suffix('.png').name
 
-    # Read CSV: columns are mode, freq_cm-1, activity
-    # delimiter=',' handles the comma-separated format; comments='#' skips header
     data       = np.loadtxt(dat_file, delimiter=',', comments='#')
     freqs_cm1  = data[:, 1]
     activities = data[:, 2]
@@ -108,9 +109,7 @@ def plot_raman_spectrum(dat_file=None,
     ax.set_ylim(bottom=0)
     ax.set_xlabel(r'Wavenumber (cm$^{-1}$)', fontsize=12)
     ax.set_ylabel('Intensity (arb. units)', fontsize=12)
-    ax.set_title(
-        title or f'Raman Spectrum — {parent_name} | Lorentzian FWHM = {gamma} cm$^{{-1}}$',
-        fontsize=12)
+    ax.set_title(title or Path(dat_file).stem, fontsize=12)
     ax.tick_params(direction='in', top=True, right=True)
 
     fig.tight_layout()
@@ -120,27 +119,24 @@ def plot_raman_spectrum(dat_file=None,
 
 
 if __name__ == '__main__':
-
-    parent_name = Path.cwd().parent.name
-
     p = argparse.ArgumentParser(
         description='Plot Raman spectrum from RASCBEC CSV output.')
-    p.add_argument('--dat', default=None,
-                   help='Input CSV file (default: raman_<parent>.csv)')
+    p.add_argument('--dat', required=True,
+        help='Input CSV file (e.g. raman_Na3PS4_Ca0.125_E0.02.csv)')
     p.add_argument('--out', default=None,
-                   help='Output PNG filename (default: raman_<parent>.png)')
+        help='Output PNG filename (default: dat stem + .png)')
     p.add_argument('--gamma', type=float, default=10.0,
-                   help='Lorentzian FWHM in cm-1 (default: 10.0)')
+        help='Lorentzian FWHM in cm⁻¹ (default: 10.0)')
     p.add_argument('--freq-min', type=float, default=0.0,
-                   help='Lower x-axis limit in cm-1 (default: 0)')
+        help='Lower x-axis limit in cm⁻¹ (default: 0)')
     p.add_argument('--freq-max', type=float, default=None,
-                   help='Upper x-axis limit in cm-1 (default: auto)')
+        help='Upper x-axis limit in cm⁻¹ (default: auto)')
     p.add_argument('--no-sticks', action='store_true',
-                   help='Hide stick spectrum (default: show sticks)')
+        help='Hide stick spectrum')
     p.add_argument('--n-labels', type=int, default=15,
-                   help='Number of peak labels to annotate (default: 15)')
+        help='Number of peak labels to annotate (default: 15)')
     p.add_argument('--title', type=str, default=None,
-                   help='Custom plot title (default: auto from parent dir name)')
+        help='Custom plot title (default: CSV filename stem)')
     args = p.parse_args()
 
     plot_raman_spectrum(
@@ -151,5 +147,5 @@ if __name__ == '__main__':
         freq_max = args.freq_max,
         sticks   = not args.no_sticks,
         n_labels = args.n_labels,
-        title    = args.title or parent_name,
+        title    = args.title,
     )
