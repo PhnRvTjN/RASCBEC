@@ -15,15 +15,18 @@
 |---|---|---|
 | Atomic masses | Hardcoded arrays | Auto-lookup via **pymatgen** |
 | OUTCAR layout | Flat files (`OUTCAR1`, `OUTCARm1`, …) | Subdirectory layout (`./1/OUTCAR`, `./m1/OUTCAR`, …) |
+| OUTCAR BEC reader | Forward scan (reads entire file) | Reverse scan — finds last BEC block directly, avoids full re-read of multi-GB OUTCARs |
 | POSCAR rotation | `rotate.py` outputs 3 flat files (`ex.POSCAR.vasp`, …) | `rotate.py` (improved) creates all 8 subdirectories with correct POSCAR in each |
-| Phonopy extraction | Not included | `qpoints_to_eigfreq.py` / `mesh_to_eigfreq.py` — parse YAML, filter modes, verify shapes |
-| Mode count | Fixed `3N` | Variable — filtered imaginary / acoustic modes handled |
+| Phonopy input | `.dat` intermediate files via `qpoints_to_eigfreq.py` / `mesh_to_eigfreq.py` | Direct YAML reading — `RASCBEC_phonopy.py` reads `qpoints.yaml` (or `mesh.yaml`) and `irreps.yaml` with no intermediate step |
+| Mode filtering | Fixed `3N`; frequency-threshold cutoff | Two independent filters: `freq < 0` (imaginary modes) and `ir_label is None` (acoustic/unassigned); a mode with a negative frequency but a valid irrep label is still excluded |
+| Mode symmetry labels | Not included | `irreps.yaml` integrated; irrep label (A1, B2, E, …) stored per mode in CSV and displayed on plot peak annotations |
 | E-field input | Manual `--E` flag required | Auto-read from `./1/OUTCAR` (EFIELD_PEAD); `--E` overrides |
 | Output filename | `raman_phonopy.dat` / `raman_vasp.dat` | Chemistry-based: `raman_<formula>_<dopants>_E<field>.csv` |
-| CSV metadata | None | Header lines: `# Formula`, `# Dopants`, `# E_field` |
-| Plot generation | Not included | Integrated via `plot_raman.py` (Lorentzian broadening, peak labels, auto title) |
+| CSV metadata | None | Header lines: `# Formula`, `# Dopants`, `# E_field`, `# Mode,Freq_cm-1,Activity,Irrep` |
+| Activity calculation | Nested Python loops O(N·27) | Vectorised `np.einsum('tikj,sti->sjk')` — BLAS-backed, seconds instead of hours for large supercells |
+| Plot generation | Not included | Integrated via `plot_raman.py` (Lorentzian broadening, peak labels with irrep, auto title) |
 | Comparison plots | Not included | `compare_raman.py` — waterfall / overlaid, absolute or normalised |
-| CLI arguments | None | `--E`, `--gamma`, `--freq-min/max`, `--no-plot`, `--out-csv/png`, … |
+| CLI arguments | None | `--E`, `--gamma`, `--freq-min/max`, `--phonon-yaml`, `--irreps`, `--no-plot`, `--out-csv/png`, … |
 | Code structure | Single monolithic script | Modular functions (BEC reader, derivative builder, activity calculator, writer) |
 
 ---
@@ -51,12 +54,12 @@ pip install numpy scipy matplotlib pymatgen pyyaml
 ```
 RASCBEC/
 ├── rotate.py               - Rotate POSCAR; create all 8 subdirectories for BEC runs
-├── qpoints_to_eigfreq.py   - Convert phonopy qpoints.yaml → freqs/eigvecs .dat files
-├── mesh_to_eigfreq.py      - Convert phonopy mesh.yaml    → freqs/eigvecs .dat files
-├── RASCBEC_phonopy.py      - Raman activities using phonopy eigenvectors (refactored)
+├── RASCBEC_phonopy.py      - Raman activities from phonopy YAML (qpoints.yaml + irreps.yaml)
 ├── RASCBEC_VASP.py         - Raman activities using VASP DFPT eigenvectors (refactored)
 ├── plot_raman.py           - Single-composition Raman spectrum plotter
 ├── compare_raman.py        - Multi-composition / multi-E-field comparison plotter
+├── qpoints_to_eigfreq.py   - Legacy: convert qpoints.yaml -> .dat (no longer needed)
+├── mesh_to_eigfreq.py      - Legacy: convert mesh.yaml -> .dat (no longer needed)
 ├── RASCBEC_vasp.py         - Original upstream script (preserved for reference)
 ├── Code/                   - Original upstream scripts
 └── Example/                - GeO2 rutile example inputs and outputs
@@ -65,6 +68,10 @@ RASCBEC/
 > `RASCBEC_phonopy.py` and `RASCBEC_VASP.py` (uppercase) are the improved
 > scripts in this fork. `RASCBEC_vasp.py` (lowercase) is the unmodified
 > original kept for reference.
+>
+> `qpoints_to_eigfreq.py` and `mesh_to_eigfreq.py` are kept for reference
+> but are no longer part of the workflow. `RASCBEC_phonopy.py` now reads
+> `qpoints.yaml` and `irreps.yaml` directly.
 
 ---
 
@@ -96,8 +103,8 @@ After VASP finishes, your working directory should look like:
 ```
 9-RASCBEC/
 ├── POSCAR
-├── freqs_phonopy.dat      (or freqs_vasp.dat)
-├── eigvecs_phonopy.dat    (or eigvecs_vasp.dat)
+├── qpoints.yaml           (phonopy path — generated in step 3)
+├── irreps.yaml            (phonopy path — generated in step 3)
 ├── 1/OUTCAR              — E-field along + (unrotated)
 ├── m1/OUTCAR             — E-field along − (unrotated)
 ├── x/OUTCAR              — E-field along +x (rotated)
@@ -139,44 +146,27 @@ intended field direction, the **inactive** EFIELD_PEAD components must be
 > (~1.4% for δ=1e-4 and E≈0.005 eV/Å). It does not cause catastrophic
 > error but is avoidable.
 
-### 3 — Extract Phonopy Eigenvectors  *(phonopy path only)*
+### 3 — Generate Phonopy YAML Files  *(phonopy path only)*
 
-If you are using `RASCBEC_phonopy.py`, you first need to convert the
-phonopy YAML output into the `.dat` files that RASCBEC expects.
-Skip this step if you are using `RASCBEC_VASP.py` (VASP writes its own
-eigenvector files directly).
+`RASCBEC_phonopy.py` reads the phonopy YAML files directly — no
+intermediate conversion step is needed. Generate `qpoints.yaml` and
+`irreps.yaml` in your working directory:
 
-**From a `qpoints.yaml` calculation** (recommended — single Γ-point, faster):
 ```bash
-phonopy --qpoints="0 0 0" --eigenvectors   # generates qpoints.yaml
-python qpoints_to_eigfreq.py
+# Generate qpoints.yaml (Gamma-point phonons + eigenvectors)
+phonopy --qpoints="0 0 0" --eigenvectors
+
+# Generate irreps.yaml (irreducible representations at Gamma)
+phonopy --irreps="0 0 0"
 ```
 
-**From a `mesh.yaml` calculation** (full Brillouin-zone mesh):
+Or from a mesh calculation (1×1×1 = Gamma only):
 ```bash
-phonopy -m 1 1 1 --eigenvectors            # generates mesh.yaml (Γ only with 1×1×1)
-python mesh_to_eigfreq.py
+phonopy -m 1 1 1 --eigenvectors    # generates mesh.yaml
+phonopy --irreps="0 0 0"           # generates irreps.yaml
 ```
 
-Both scripts print a mode summary and run shape-verification assertions:
-
-```
-Total modes : 375
-Removed     : 3  (freq < 0.1 THz)
-Retained    : 372
-Freq range  : 0.1234 - 22.5678 THz
-             (4.12 - 752.74 cm⁻¹)
-Eigvec norm : min=0.99998  max=1.00001  (should be ~1.0)
-
-File shapes written to disk:
-  freqs_phonopy.dat   : (372,)       ← should be (372,)
-  eigvecs_phonopy.dat : (375, 372)   ← should be (375, 372)
-
-✓ All shape checks passed — ready for RASCBEC.
-```
-
-The `FREQ_CUTOFF` constant at the top of each script (default `0.1 THz`)
-controls which modes are treated as acoustic / imaginary and discarded.
+Skip this step entirely if you are using `RASCBEC_VASP.py`.
 
 ### 4 — Compute Raman Activities
 
@@ -184,6 +174,12 @@ controls which modes are treated as acoustic / imaginary and discarded.
 ```bash
 python RASCBEC_phonopy.py
 python RASCBEC_phonopy.py --gamma 15 --freq-min 50 --freq-max 600
+
+# Use mesh.yaml instead of qpoints.yaml
+python RASCBEC_phonopy.py --phonon-yaml mesh.yaml
+
+# Custom irreps file location
+python RASCBEC_phonopy.py --irreps path/to/irreps.yaml
 ```
 
 **VASP DFPT eigenvectors** (frequencies in cm⁻¹, already mass-normalised):
@@ -203,8 +199,7 @@ python RASCBEC_phonopy.py --E 0.02
 > `RASCBEC_phonopy.py` does. Using the wrong script with the wrong
 > eigenvector type will give incorrect Raman intensities.
 
-Output filenames are derived from the POSCAR chemistry — no directory
-naming convention required:
+Output filenames are derived from the POSCAR chemistry:
 ```
 raman_Na3PS4_E0.02.csv                   # undoped
 raman_Na3PS4_Ca0.125_Cl0.5_E0.02.csv    # Ca+Cl co-doped
@@ -250,7 +245,23 @@ raman_compare_Na3PS4_abs.png     # absolute overlaid
 
 ## CLI Reference
 
-### `RASCBEC_phonopy.py` / `RASCBEC_VASP.py`
+### `RASCBEC_phonopy.py`
+
+| Argument | Default | Description |
+|---|---|---|
+| `--E` | auto | EFIELD_PEAD value — auto-read from `./1/OUTCAR`; override here if needed |
+| `--gamma` | `10.0` | Lorentzian FWHM for broadening (cm⁻¹) |
+| `--freq-min` | `0.0` | Lower plot x-limit (cm⁻¹) |
+| `--freq-max` | auto | Upper plot x-limit (cm⁻¹) |
+| `--phonon-yaml` | `qpoints.yaml` | Phonopy phonon data file; accepts `qpoints.yaml` or `mesh.yaml` |
+| `--irreps` | `irreps.yaml` | Phonopy irreducible representations file |
+| `--no-plot` | — | Skip PNG generation |
+| `--no-sticks` | — | Hide stick spectrum in plot |
+| `--n-labels` | `20` | Number of peak frequency labels |
+| `--out-csv` | auto | Override output CSV name |
+| `--out-png` | auto | Override output PNG name |
+
+### `RASCBEC_VASP.py`
 
 | Argument | Default | Description |
 |---|---|---|
@@ -294,21 +305,25 @@ raman_compare_Na3PS4_abs.png     # absolute overlaid
 
 ## Output CSV Format
 
-Every CSV produced by the RASCBEC scripts includes a metadata header:
+Every CSV produced by the RASCBEC scripts includes a metadata header and
+an Irrep column (phonopy path) for mode symmetry labels:
 
 ```
 # Formula: Na3PS4
 # Dopants: Ca(x=0.125)/Cl(x=0.5)
 # E_field: 0.02
-# Mode,Freq_cm-1,Activity
-0001,83.672345,148.546403
-0002,91.234567,0.001234
+# Mode,Freq_cm-1,Activity,Irrep
+0001,83.672345,148.546403,A1
+0002,91.234567,0.001234,E
 ...
 ```
 
-The `#`-prefixed lines are skipped by `numpy.loadtxt` and other standard
-readers. `compare_raman.py` parses them to auto-build legend labels and
-figure titles.
+The `#`-prefixed lines are skipped by standard readers. `compare_raman.py`
+parses them to auto-build legend labels and figure titles. The `Irrep`
+column is used by `plot_raman.py` and `compare_raman.py` to annotate
+peaks with their symmetry label; it is absent in CSVs produced by
+`RASCBEC_VASP.py` (which does not read `irreps.yaml`), and both plotters
+handle the 3-column format transparently.
 
 ---
 
@@ -353,8 +368,8 @@ Input files are in the `Example/` folder. Run:
 
 ```bash
 cd Example
-python ../RASCBEC_VASP.py     # uses freqs_vasp.dat + eigvecs_vasp.dat
-python ../RASCBEC_phonopy.py  # uses freqs_phonopy.dat + eigvecs_phonopy.dat
+python ../RASCBEC_VASP.py     # uses VASP DFPT eigenvectors directly
+python ../RASCBEC_phonopy.py  # uses qpoints.yaml + irreps.yaml
 ```
 
 Expected outputs (chemistry-based names, E auto-read from OUTCAR):
