@@ -15,7 +15,7 @@
 |---|---|---|
 | Atomic masses | Hardcoded arrays | Auto-lookup via **pymatgen** |
 | OUTCAR layout | Flat files (`OUTCAR1`, `OUTCARm1`, …) | Subdirectory layout (`./1/OUTCAR`, `./m1/OUTCAR`, …) |
-| POSCAR rotation | Not included | `rotate.py` generates all 8 subdirectories (`./1/`, `./m1/`, `./x/`, …) |
+| POSCAR rotation | No subdirectory generation | `rotate.py` generates all 8 subdirectories (`./1/`, `./m1/`, `./x/`, …) |
 | Mode count | Fixed `3N` | Variable — filtered imaginary / acoustic modes handled |
 | E-field input | Manual `--E` flag required | Auto-read from `./1/OUTCAR` (EFIELD_PEAD); `--E` overrides |
 | Output filename | `raman_phonopy.dat` / `raman_vasp.dat` | Chemistry-based: `raman_<formula>_<dopants>_E<field>.csv` |
