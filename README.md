@@ -15,7 +15,8 @@
 |---|---|---|
 | Atomic masses | Hardcoded arrays | Auto-lookup via **pymatgen** |
 | OUTCAR layout | Flat files (`OUTCAR1`, `OUTCARm1`, …) | Subdirectory layout (`./1/OUTCAR`, `./m1/OUTCAR`, …) |
-| POSCAR rotation | No subdirectory generation | `rotate.py` generates all 8 subdirectories (`./1/`, `./m1/`, `./x/`, …) |
+| POSCAR rotation | `rotate.py` outputs 3 flat files (`ex.POSCAR.vasp`, …) | `rotate.py` (improved) creates all 8 subdirectories with correct POSCAR in each |
+| Phonopy extraction | Not included | `qpoints_to_eigfreq.py` / `mesh_to_eigfreq.py` — parse YAML, filter modes, verify shapes |
 | Mode count | Fixed `3N` | Variable — filtered imaginary / acoustic modes handled |
 | E-field input | Manual `--E` flag required | Auto-read from `./1/OUTCAR` (EFIELD_PEAD); `--E` overrides |
 | Output filename | `raman_phonopy.dat` / `raman_vasp.dat` | Chemistry-based: `raman_<formula>_<dopants>_E<field>.csv` |
@@ -35,11 +36,12 @@ numpy
 scipy
 matplotlib
 pymatgen
+pyyaml
 ```
 
 Install all at once:
 ```bash
-pip install numpy scipy matplotlib pymatgen
+pip install numpy scipy matplotlib pymatgen pyyaml
 ```
 
 ---
@@ -48,14 +50,16 @@ pip install numpy scipy matplotlib pymatgen
 
 ```
 RASCBEC/
-├── rotate.py            - Rotate POSCAR and create all 8 subdirectories for BEC runs
-├── RASCBEC_phonopy.py   - Raman activities using phonopy eigenvectors (refactored)
-├── RASCBEC_VASP.py      - Raman activities using VASP DFPT eigenvectors (refactored)
-├── plot_raman.py        - Single-composition Raman spectrum plotter
-├── compare_raman.py     - Multi-composition / multi-E-field comparison plotter
-├── RASCBEC_vasp.py      - Original upstream script (preserved for reference)
-├── Code/                - Original upstream scripts
-└── Example/             - GeO2 rutile example inputs and outputs
+├── rotate.py               - Rotate POSCAR; create all 8 subdirectories for BEC runs
+├── qpoints_to_eigfreq.py   - Convert phonopy qpoints.yaml → freqs/eigvecs .dat files
+├── mesh_to_eigfreq.py      - Convert phonopy mesh.yaml    → freqs/eigvecs .dat files
+├── RASCBEC_phonopy.py      - Raman activities using phonopy eigenvectors (refactored)
+├── RASCBEC_VASP.py         - Raman activities using VASP DFPT eigenvectors (refactored)
+├── plot_raman.py           - Single-composition Raman spectrum plotter
+├── compare_raman.py        - Multi-composition / multi-E-field comparison plotter
+├── RASCBEC_vasp.py         - Original upstream script (preserved for reference)
+├── Code/                   - Original upstream scripts
+└── Example/                - GeO2 rutile example inputs and outputs
 ```
 
 > `RASCBEC_phonopy.py` and `RASCBEC_VASP.py` (uppercase) are the improved
@@ -104,7 +108,46 @@ After VASP finishes, your working directory should look like:
 └── mz/OUTCAR             — E-field along −z
 ```
 
-### 3 — Compute Raman Activities
+### 3 — Extract Phonopy Eigenvectors  *(phonopy path only)*
+
+If you are using `RASCBEC_phonopy.py`, you first need to convert the
+phonopy YAML output into the `.dat` files that RASCBEC expects.
+Skip this step if you are using `RASCBEC_VASP.py` (VASP writes its own
+eigenvector files directly).
+
+**From a `qpoints.yaml` calculation** (recommended — single Γ-point, faster):
+```bash
+phonopy --qpoints="0 0 0" --eigenvectors   # generates qpoints.yaml
+python qpoints_to_eigfreq.py
+```
+
+**From a `mesh.yaml` calculation** (full Brillouin-zone mesh):
+```bash
+phonopy -m 1 1 1 --eigenvectors            # generates mesh.yaml (Γ only with 1×1×1)
+python mesh_to_eigfreq.py
+```
+
+Both scripts print a mode summary and run shape-verification assertions:
+
+```
+Total modes : 375
+Removed     : 3  (freq < 0.1 THz)
+Retained    : 372
+Freq range  : 0.1234 - 22.5678 THz
+             (4.12 - 752.74 cm⁻¹)
+Eigvec norm : min=0.99998  max=1.00001  (should be ~1.0)
+
+File shapes written to disk:
+  freqs_phonopy.dat   : (372,)       ← should be (372,)
+  eigvecs_phonopy.dat : (375, 372)   ← should be (375, 372)
+
+✓ All shape checks passed — ready for RASCBEC.
+```
+
+The `FREQ_CUTOFF` constant at the top of each script (default `0.1 THz`)
+controls which modes are treated as acoustic / imaginary and discarded.
+
+### 4 — Compute Raman Activities
 
 **Phonopy eigenvectors** (frequencies in THz, un-mass-normalised):
 ```bash
@@ -136,7 +179,7 @@ raman_Na3PS4_E0.02.csv                   # undoped
 raman_Na3PS4_Ca0.125_Cl0.5_E0.02.csv    # Ca+Cl co-doped
 ```
 
-### 4 — Plot a Single Spectrum
+### 5 — Plot a Single Spectrum
 
 `plot_raman.py` is called automatically by both RASCBEC scripts but can
 also be run standalone:
@@ -146,7 +189,7 @@ python plot_raman.py --dat raman_Na3PS4_Ca0.125_Cl0.5_E0.02.csv
 python plot_raman.py --dat raman_Na3PS4_E0.02.csv --gamma 10 --freq-min 0 --freq-max 600
 ```
 
-### 5 — Compare Multiple Compositions
+### 6 — Compare Multiple Compositions
 
 ```bash
 # Waterfall (auto-normalises each, 10 peak labels per spectrum)
