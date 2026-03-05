@@ -15,11 +15,13 @@
 |---|---|---|
 | Atomic masses | Hardcoded arrays | Auto-lookup via **pymatgen** |
 | OUTCAR layout | Flat files (`OUTCAR1`, `OUTCARm1`, …) | Subdirectory layout (`./1/OUTCAR`, `./m1/OUTCAR`, …) |
-| Mode count | Fixed `3N` | Variable - filtered imaginary / acoustic modes handled |
-| Output filename | `raman_phonopy.dat` / `raman_vasp.dat` | `raman_<composition>_<E>.csv` (E-field encoded) |
-| CSV metadata | None | Header lines: `# Formula`, `# Dopants`, `# E_field`, `# Composition` |
+| POSCAR rotation | Not included | `rotate.py` generates all 8 subdirectories (`./1/`, `./m1/`, `./x/`, …) |
+| Mode count | Fixed `3N` | Variable — filtered imaginary / acoustic modes handled |
+| E-field input | Manual `--E` flag required | Auto-read from `./1/OUTCAR` (EFIELD_PEAD); `--E` overrides |
+| Output filename | `raman_phonopy.dat` / `raman_vasp.dat` | Chemistry-based: `raman_<formula>_<dopants>_E<field>.csv` |
+| CSV metadata | None | Header lines: `# Formula`, `# Dopants`, `# E_field` |
 | Plot generation | Not included | Integrated via `plot_raman.py` (Lorentzian broadening, peak labels, auto title) |
-| Comparison plots | Not included | `compare_raman.py` - waterfall / overlaid, absolute or normalised |
+| Comparison plots | Not included | `compare_raman.py` — waterfall / overlaid, absolute or normalised |
 | CLI arguments | None | `--E`, `--gamma`, `--freq-min/max`, `--no-plot`, `--out-csv/png`, … |
 | Code structure | Single monolithic script | Modular functions (BEC reader, derivative builder, activity calculator, writer) |
 
@@ -46,7 +48,7 @@ pip install numpy scipy matplotlib pymatgen
 
 ```
 RASCBEC/
-├── rotate.py            - Rotate POSCAR for ±x/y/z E-field directions
+├── rotate.py            - Rotate POSCAR and create all 8 subdirectories for BEC runs
 ├── RASCBEC_phonopy.py   - Raman activities using phonopy eigenvectors (refactored)
 ├── RASCBEC_VASP.py      - Raman activities using VASP DFPT eigenvectors (refactored)
 ├── plot_raman.py        - Single-composition Raman spectrum plotter
@@ -64,47 +66,62 @@ RASCBEC/
 
 ## Workflow
 
-### 1 - Rotate POSCAR
+### 1 — Rotate POSCAR
 
 ```bash
 python rotate.py
 ```
 
-Generates `ex.POSCAR.vasp`, `ey.POSCAR.vasp`, `ez.POSCAR.vasp` for
-electric-field directions along ±x, ±y, ±z.
+Creates all 8 subdirectories with the correct POSCAR in each:
 
-### 2 - Run 8 BEC Calculations
+```
+./1/POSCAR   ./m1/POSCAR    — unrotated reference (copied directly)
+./x/POSCAR   ./mx/POSCAR   — 45° rotation in xy-plane
+./y/POSCAR   ./my/POSCAR   — 45° rotation in yz-plane
+./z/POSCAR   ./mz/POSCAR   — 45° rotation in xz-plane
+```
 
-Organise VASP calculations in subdirectories.
-The scripts expect the following layout in your working directory:
+Place the appropriate INCAR, KPOINTS, and POTCAR in each subdirectory
+(INCAR should set `EFIELD_PEAD`, `LCALCEPS = .TRUE.`; sign of the field
+is controlled per subdirectory in the INCAR, not the POSCAR).
+
+### 2 — Run 8 BEC Calculations
+
+After VASP finishes, your working directory should look like:
 
 ```
 9-RASCBEC/
 ├── POSCAR
 ├── freqs_phonopy.dat      (or freqs_vasp.dat)
 ├── eigvecs_phonopy.dat    (or eigvecs_vasp.dat)
-├── 1/OUTCAR              - E-field along + (unrotated)
-├── m1/OUTCAR             - E-field along − (unrotated)
-├── x/OUTCAR              - E-field along +x (rotated)
-├── mx/OUTCAR             - E-field along −x
-├── y/OUTCAR              - E-field along +y (rotated)
-├── my/OUTCAR             - E-field along −y
-├── z/OUTCAR              - E-field along +z (rotated)
-└── mz/OUTCAR             - E-field along −z
+├── 1/OUTCAR              — E-field along + (unrotated)
+├── m1/OUTCAR             — E-field along − (unrotated)
+├── x/OUTCAR              — E-field along +x (rotated)
+├── mx/OUTCAR             — E-field along −x
+├── y/OUTCAR              — E-field along +y (rotated)
+├── my/OUTCAR             — E-field along −y
+├── z/OUTCAR              — E-field along +z (rotated)
+└── mz/OUTCAR             — E-field along −z
 ```
 
-### 3 - Compute Raman Activities
+### 3 — Compute Raman Activities
 
 **Phonopy eigenvectors** (frequencies in THz, un-mass-normalised):
 ```bash
 python RASCBEC_phonopy.py
-python RASCBEC_phonopy.py --E 0.02 --gamma 15 --freq-min 50 --freq-max 600
+python RASCBEC_phonopy.py --gamma 15 --freq-min 50 --freq-max 600
 ```
 
 **VASP DFPT eigenvectors** (frequencies in cm⁻¹, already mass-normalised):
 ```bash
 python RASCBEC_VASP.py
-python RASCBEC_VASP.py --E 0.02 --gamma 15 --no-plot
+python RASCBEC_VASP.py --gamma 15 --no-plot
+```
+
+The E-field magnitude is read automatically from `./1/OUTCAR`.
+Override only if needed:
+```bash
+python RASCBEC_phonopy.py --E 0.02
 ```
 
 > **Key distinction:** VASP eigenvectors are already mass-normalised by
@@ -112,25 +129,27 @@ python RASCBEC_VASP.py --E 0.02 --gamma 15 --no-plot
 > `RASCBEC_phonopy.py` does. Using the wrong script with the wrong
 > eigenvector type will give incorrect Raman intensities.
 
-Output (run from `.../06-12/9-RASCBEC/` with `--E 0.02`):
+Output filenames are derived from the POSCAR chemistry — no directory
+naming convention required:
 ```
-raman_06-12_0.02.csv
-raman_06-12_0.02.png
+raman_Na3PS4_E0.02.csv                   # undoped
+raman_Na3PS4_Ca0.125_Cl0.5_E0.02.csv    # Ca+Cl co-doped
 ```
 
-### 4 - Plot a Single Spectrum
+### 4 — Plot a Single Spectrum
 
-`plot_raman.py` is used internally by both RASCBEC scripts but can also
-be called standalone:
+`plot_raman.py` is called automatically by both RASCBEC scripts but can
+also be run standalone:
 
 ```bash
-python plot_raman.py --dat raman_06-12_0.02.csv --gamma 10 --freq-min 0 --freq-max 600
+python plot_raman.py --dat raman_Na3PS4_Ca0.125_Cl0.5_E0.02.csv
+python plot_raman.py --dat raman_Na3PS4_E0.02.csv --gamma 10 --freq-min 0 --freq-max 600
 ```
 
-### 5 - Compare Multiple Compositions
+### 5 — Compare Multiple Compositions
 
 ```bash
-# Waterfall (auto applies --normalize-each, 10 peak labels per spectrum)
+# Waterfall (auto-normalises each, 10 peak labels per spectrum)
 python compare_raman.py raman_*.csv --offset 1.2
 
 # Global normalisation waterfall
@@ -140,7 +159,7 @@ python compare_raman.py raman_*.csv --normalize --offset 1.2
 python compare_raman.py raman_*.csv
 
 # Same composition, different E-field (E auto-appended to legend)
-python compare_raman.py raman_06-12_0.01.csv raman_06-12_0.02.csv raman_06-12_0.05.csv --offset 1.2
+python compare_raman.py raman_Na3PS4_E0.01.csv raman_Na3PS4_E0.02.csv raman_Na3PS4_E0.05.csv --offset 1.2
 
 # Custom labels / output name
 python compare_raman.py raman_*.csv --offset 1.2 --labels "Undoped" "Ca-doped" "Ca/Cl-doped" --out fig1.png
@@ -161,15 +180,27 @@ raman_compare_Na3PS4_abs.png     # absolute overlaid
 
 | Argument | Default | Description |
 |---|---|---|
-| `--E` | `0.02` | EFIELD_PEAD value used in BEC calculations (eV/Å) |
+| `--E` | auto | EFIELD_PEAD value — auto-read from `./1/OUTCAR`; override here if needed |
 | `--gamma` | `10.0` | Lorentzian FWHM for broadening (cm⁻¹) |
 | `--freq-min` | `0.0` | Lower plot x-limit (cm⁻¹) |
 | `--freq-max` | auto | Upper plot x-limit (cm⁻¹) |
-| `--no-plot` | - | Skip PNG generation |
-| `--no-sticks` | - | Hide stick spectrum in plot |
+| `--no-plot` | — | Skip PNG generation |
+| `--no-sticks` | — | Hide stick spectrum in plot |
 | `--n-labels` | `20` | Number of peak frequency labels |
 | `--out-csv` | auto | Override output CSV name |
 | `--out-png` | auto | Override output PNG name |
+
+### `plot_raman.py`
+
+| Argument | Default | Description |
+|---|---|---|
+| `--dat` | required | Input CSV file |
+| `--out` | auto | Output PNG (defaults to CSV stem + .png) |
+| `--gamma` | `10.0` | Lorentzian FWHM (cm⁻¹) |
+| `--freq-min/max` | `0` / auto | Plot x-axis range |
+| `--no-sticks` | — | Hide stick spectrum |
+| `--n-labels` | `15` | Number of peak labels |
+| `--title` | auto | Custom plot title |
 
 ### `compare_raman.py`
 
@@ -177,10 +208,10 @@ raman_compare_Na3PS4_abs.png     # absolute overlaid
 |---|---|---|
 | `--gamma` | `10.0` | Lorentzian FWHM (cm⁻¹) |
 | `--freq-min/max` | `0` / auto | Plot x-axis range |
-| `--normalize` | - | Normalise all to global maximum |
+| `--normalize` | — | Normalise all to global maximum |
 | `--normalize-each` | auto with `--offset` | Normalise each to its own maximum |
 | `--offset` | `0.0` | Vertical offset per spectrum (waterfall); auto-applies `--normalize-each` |
-| `--sticks` | - | Show stick spectrum |
+| `--sticks` | — | Show stick spectrum |
 | `--n-labels` | `10` | Peak labels per spectrum (waterfall only) |
 | `--labels` | auto | Override legend labels |
 | `--out` | auto | Output PNG name |
@@ -193,9 +224,8 @@ Every CSV produced by the RASCBEC scripts includes a metadata header:
 
 ```
 # Formula: Na3PS4
-# Dopants: Ca(x=0.06)/Cl(x=0.12)
+# Dopants: Ca(x=0.125)/Cl(x=0.5)
 # E_field: 0.02
-# Composition: 06-12
 # Mode,Freq_cm-1,Activity
 0001,83.672345,148.546403
 0002,91.234567,0.001234
@@ -218,9 +248,11 @@ python ../RASCBEC_VASP.py     # uses freqs_vasp.dat + eigvecs_vasp.dat
 python ../RASCBEC_phonopy.py  # uses freqs_phonopy.dat + eigvecs_phonopy.dat
 ```
 
-Expected outputs:
-- `raman_Example_0.02.csv`
-- `raman_Example_0.02.png`
+Expected outputs (chemistry-based names, E auto-read from OUTCAR):
+```
+raman_GeO2_E0.02.csv
+raman_GeO2_E0.02.png
+```
 
 ---
 
