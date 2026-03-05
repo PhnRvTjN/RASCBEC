@@ -393,4 +393,4 @@ https://doi.org/10.1016/j.cpc.2024.109425
 ---
 
 *Fork maintained by [PhnRvTjN](https://github.com/PhnRvTjN).
-Original repository: [RASCBEC]((https://github.com/rruuiizz/RASCBEC).*
+Original repository: [RASCBEC](https://github.com/rruuiizz/RASCBEC).*
