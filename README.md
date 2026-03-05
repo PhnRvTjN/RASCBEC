@@ -18,7 +18,7 @@
 | OUTCAR BEC reader | Forward scan (reads entire file) | Reverse scan — finds last BEC block directly, avoids full re-read of multi-GB OUTCARs |
 | POSCAR rotation | `rotate.py` outputs 3 flat files (`ex.POSCAR.vasp`, …) | `rotate.py` (improved) creates all 8 subdirectories with correct POSCAR in each |
 | Phonopy input | `.dat` intermediate files via `qpoints_to_eigfreq.py` / `mesh_to_eigfreq.py` | Direct YAML reading — `RASCBEC_phonopy.py` reads `qpoints.yaml` (or `mesh.yaml`) and `irreps.yaml` with no intermediate step |
-| Mode filtering | Fixed `3N`; frequency-threshold cutoff | Two independent filters: `freq < 0` (imaginary modes) and `ir_label is None` (acoustic/unassigned); a mode with a negative frequency but a valid irrep label is still excluded |
+| Mode filtering | Fixed `3N`; frequency-threshold cutoff | Two independent filters: `freq < 0.1` (imaginary modes) and `ir_label is None` (acoustic/unassigned); a mode with a negative frequency but a valid irrep label is still excluded |
 | Mode symmetry labels | Not included | `irreps.yaml` integrated; irrep label (A1, B2, E, …) stored per mode in CSV and displayed on plot peak annotations |
 | E-field input | Manual `--E` flag required | Auto-read from `./1/OUTCAR` (EFIELD_PEAD); `--E` overrides |
 | Output filename | `raman_phonopy.dat` / `raman_vasp.dat` | Chemistry-based: `raman_<formula>_<dopants>_E<field>.csv` |
