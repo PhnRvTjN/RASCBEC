@@ -108,6 +108,37 @@ After VASP finishes, your working directory should look like:
 └── mz/OUTCAR             — E-field along −z
 ```
 
+#### ⚠️ EFIELD_PEAD sign convention for inactive components
+
+RASCBEC builds ∂Z\*/∂E via central differences between + and − runs
+(e.g., `./x` vs `./mx`). For these differences to correctly isolate the
+intended field direction, the **inactive** EFIELD_PEAD components must be
+**identical** in the + and − runs so they cancel in the subtraction.
+
+**Correct** (inactive components same sign in both runs — cancel exactly):
+```
+./x  INCAR:  EFIELD_PEAD = +E   +δ   +δ
+./mx INCAR:  EFIELD_PEAD = -E   +δ   +δ
+```
+
+**Incorrect** (inactive components sign-flipped — do NOT cancel, introduces ~δ/E error):
+```
+./x  INCAR:  EFIELD_PEAD = +E   +δ   +δ
+./mx INCAR:  EFIELD_PEAD = -E   -δ   -δ
+```
+
+> **VASP reset behavior:** if you set an inactive component to `0.0`, VASP
+> internally resets it to a small positive constant (commonly `+0.01`) in
+> **both** the + and − runs. This is safe — the reset value is the same
+> sign in both runs and cancels in the central difference.
+>
+> If you manually use a small nonzero value (e.g., `δ = 1e-4`) to avoid
+> this reset, use `+δ` in **both** the + and − runs for the inactive
+> components. Using `−δ` in the negative-field run introduces a
+> contamination term of order δ/E in the off-diagonal BEC derivatives
+> (~1.4% for δ=1e-4 and E≈0.005 eV/Å). It does not cause catastrophic
+> error but is avoidable.
+
 ### 3 — Extract Phonopy Eigenvectors  *(phonopy path only)*
 
 If you are using `RASCBEC_phonopy.py`, you first need to convert the
@@ -278,6 +309,41 @@ Every CSV produced by the RASCBEC scripts includes a metadata header:
 The `#`-prefixed lines are skipped by `numpy.loadtxt` and other standard
 readers. `compare_raman.py` parses them to auto-build legend labels and
 figure titles.
+
+---
+
+## Known Limitations
+
+### A1 and B1 modes may show zero activity in high-symmetry structures
+
+In structures with D2d (point group -42m) site symmetry — such as
+tetragonal Na₃PS₄ — all A1 and B1 phonon modes may yield exactly zero
+Raman activity from RASCBEC. This is under investigation; it may reflect
+a fundamental limitation of the BEC-derivative approximation for symmetric
+breathing modes, or a symmetry-related cancellation in the eigenvector
+projection. B2 and E modes are unaffected.
+
+In low-symmetry (e.g., P1) doped supercells, strict A1/B1 symmetry is
+broken and the affected modes are expected to acquire nonzero activities.
+
+### Zener tunneling limits the safe EFIELD_PEAD range
+
+For small-bandgap inorganic solids, the Zener criterion places a tight
+upper bound on the safe field magnitude:
+
+```
+E_max (eV/Å) ≈ E_gap / (10 × N_k × c)
+```
+
+where `E_gap` is the DFT bandgap (eV), `N_k` is the number of k-points
+along the field direction, and `c` is the longest lattice parameter (Å).
+For Na₃PS₄ with a 5×5×5 Gamma-centered k-mesh, `E_max ≈ 0.006 eV/Å` —
+far below the field strengths used in the original GeO₂ benchmark
+(E = 0.1 eV/Å). Fields above this limit produce Zener-corrupted spectra
+dominated by spurious high-frequency peaks. Fields too far below it may
+produce near-zero activities for all modes due to signal falling below
+the SCF precision floor (controlled by EDIFF). Recommended starting
+point: `EFIELD_PEAD ≈ 0.5 × E_max`, `EDIFF = 1E-7`.
 
 ---
 
