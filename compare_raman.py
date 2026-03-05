@@ -1,38 +1,45 @@
 #!/usr/bin/env python3
 
 """
-compare_raman.py — Overlay Raman spectra from multiple RASCBEC CSV files.
+compare_raman.py -- Overlay Raman spectra from multiple RASCBEC CSV files.
+
+Reads the 4-column CSV format produced by the updated RASCBEC_phonopy.py
+(Mode, Freq_cm-1, Activity, Irrep) and is backwards-compatible with the old
+3-column format (no Irrep column).
+
+In waterfall (--offset) mode, peak labels show the irrep symbol above the
+frequency (e.g. A1 / 487) when Irrep data is present in the CSV.
 
 Constraints
 -----------
-  --offset > 0   automatically applies --normalize-each if no norm flag is given
-  Peak labels    shown ONLY in offset (waterfall) mode; default --n-labels 10
+--offset > 0 automatically applies --normalize-each if no norm flag is given
+Peak labels shown ONLY in offset (waterfall) mode; default --n-labels 10
 
 Output filename (when --out is not given)
 -----------------------------------------
-  raman_compare_<formula>_<norm>.png
+raman_compare_<formula>_<norm>.png
 
-  formula : shared formula from CSV metadata (e.g. Na3PS4); 'mixed' if differ
-  norm    : abs | gnorm | enorm
+formula : shared formula from CSV metadata (e.g. Na3PS4); 'mixed' if differ
+norm    : abs | gnorm | enorm
 
-  e.g.  raman_compare_Na3PS4_enorm.png
+e.g. raman_compare_Na3PS4_enorm.png
 
 Comparing same composition at different E-fields
 -------------------------------------------------
-  When all CSVs share the same chemical label (formula + dopants), the E-field
-  is automatically appended to each legend entry so spectra are distinguishable.
-  The E-field is then omitted from the title (it lives in the legend instead).
+When all CSVs share the same chemical label (formula + dopants), the E-field
+is automatically appended to each legend entry so spectra are distinguishable.
+The E-field is then omitted from the title (it lives in the legend instead).
 
 Legend labels and title are read from the CSV metadata header:
-  # Formula:  Na3PS4
-  # Dopants:  Ca(x=0.06)/Cl(x=0.12)
-  # E_field:  0.02
+# Formula: Na3PS4
+# Dopants: Ca(x=0.06)/Cl(x=0.12)
+# E_field: 0.02
 
 Usage:
     # Overlaid absolute (no labels)
     python compare_raman.py raman_*.csv
 
-    # Waterfall — auto normalize-each + labels (typical use)
+    # Waterfall -- auto normalize-each + labels (typical use)
     python compare_raman.py raman_*.csv --offset 1.2
 
     # Waterfall with explicit global normalisation
@@ -46,7 +53,7 @@ Usage:
 
     # Finer control
     python compare_raman.py raman_*.csv --offset 1.2 --n-labels 5
-    python compare_raman.py raman_*.csv --offset 1.2 --n-labels 0  # disable labels
+    python compare_raman.py raman_*.csv --offset 1.2 --n-labels 0   # disable labels
     python compare_raman.py raman_*.csv --gamma 8 --freq-min 50 --freq-max 550
     python compare_raman.py raman_*.csv --out my_fig.png
     python compare_raman.py --help
@@ -62,14 +69,12 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 
-
 # ---------------------------------------------------------------------------
 # Lorentzian broadening
 # ---------------------------------------------------------------------------
 
 def lorentzian(x, x0, A, gamma):
     return A * (gamma / 2)**2 / ((x - x0)**2 + (gamma / 2)**2)
-
 
 def build_spectrum(freqs_cm1, activities, x, gamma, freq_min, freq_max):
     """Absolute Lorentzian-broadened spectrum on grid x."""
@@ -78,7 +83,6 @@ def build_spectrum(freqs_cm1, activities, x, gamma, freq_min, freq_max):
         if A > 0 and freq_min <= f <= freq_max:
             spectrum += lorentzian(x, f, A, gamma)
     return spectrum
-
 
 # ---------------------------------------------------------------------------
 # File helpers
@@ -91,20 +95,23 @@ def expand_globs(patterns):
         files.extend(expanded if expanded else [p])
     return files
 
-
 def load_csv(filepath):
     """
-    Load a RASCBEC CSV.  Returns (freqs_cm1, activities, meta).
+    Load a RASCBEC CSV.  Returns (freqs_cm1, activities, irrep_labels, meta).
+
+    Handles both the old 3-column format (Mode, Freq_cm-1, Activity) and the
+    new 4-column format (Mode, Freq_cm-1, Activity, Irrep).  irrep_labels
+    contains empty strings for all modes when the Irrep column is absent.
 
     Metadata parsed from comment lines (all default to '' if absent):
-      # Formula, # Dopants, # E_field
+    # Formula, # Dopants, # E_field
     """
-    meta  = {'formula': '', 'dopants': '', 'e_field': ''}
-    freqs, acts = [], []
+    meta = {'formula': '', 'dopants': '', 'e_field': ''}
+    freqs, acts, irreps = [], [], []
     with open(filepath) as f:
         for line in f:
             s = line.strip()
-            if   s.startswith('# Formula:'):
+            if s.startswith('# Formula:'):
                 meta['formula'] = s.split(':', 1)[1].strip()
             elif s.startswith('# Dopants:'):
                 meta['dopants'] = s.split(':', 1)[1].strip()
@@ -116,8 +123,8 @@ def load_csv(filepath):
                 parts = s.split(',')
                 freqs.append(float(parts[1]))
                 acts.append(float(parts[2]))
-    return np.array(freqs), np.array(acts), meta
-
+                irreps.append(parts[3].strip() if len(parts) > 3 else '')
+    return np.array(freqs), np.array(acts), irreps, meta
 
 def filename_fallback(filepath):
     """
@@ -126,20 +133,18 @@ def filename_fallback(filepath):
 
     Examples
     --------
-    raman_Na3PS4_E0.02.csv              -> ('Na3PS4',          '0.02')
+    raman_Na3PS4_E0.02.csv              -> ('Na3PS4', '0.02')
     raman_Na3PS4_Ca0.125_Cl0.5_E0.02.csv -> ('Na3PS4_Ca0.125_Cl0.5', '0.02')
     """
-    stem  = Path(filepath).stem                          # e.g. raman_Na3PS4_E0.02
+    stem  = Path(filepath).stem
     inner = stem[6:] if stem.startswith('raman_') else stem
-    parts = inner.rsplit('_', 1)                         # split off last segment
+    parts = inner.rsplit('_', 1)
     if len(parts) == 2:
         tag, last = parts
-        # Strip leading 'E' or 'e' from the field value if present
         efield = last.lstrip('Ee') if last[:1].lower() == 'e' else ''
         if efield:
             return tag, efield
     return inner, ''
-
 
 def chem_label(meta, filepath):
     """
@@ -152,37 +157,30 @@ def chem_label(meta, filepath):
     base    = formula or tag
     return f"{base} [{dopants}]" if dopants else base
 
-
 def get_efield(meta, filepath):
     """Return E-field string from metadata or filename fallback."""
     return meta.get('e_field', '') or filename_fallback(filepath)[1]
-
 
 def build_legend_labels(all_meta, files):
     """
     Build legend labels with automatic E-field disambiguation.
 
-    - Different compositions, same E  -> 'Na3PS4 [Ca(x=0.06)/Cl(x=0.12)]'  (E in title)
-    - Same composition, different E   -> 'Na3PS4 [...] | E=0.02 eV/Å'       (E in legend)
-    - Both differ                     -> 'Na3PS4 [...] | E=0.02 eV/Å'       (E in legend)
+    - Different compositions, same E -> 'Na3PS4 [Ca(x=0.06)/Cl(x=0.12)]' (E in title)
+    - Same composition, different E  -> 'Na3PS4 [...] | E=0.02 eV/Ang'   (E in legend)
+    - Both differ                    -> 'Na3PS4 [...] | E=0.02 eV/Ang'   (E in legend)
 
     Returns (legend_labels, efield_in_legend)
-      efield_in_legend : bool — True means E is in the legend, not the title
+    efield_in_legend : bool -- True means E is in the legend, not the title
     """
-    chem_labels = [chem_label(m, f) for m, f in zip(all_meta, files)]
-    efields     = [get_efield(m, f)  for m, f in zip(all_meta, files)]
-
-    # If chemical labels are not all unique, differentiate by E-field
+    chem_labels      = [chem_label(m, f) for m, f in zip(all_meta, files)]
+    efields          = [get_efield(m, f)  for m, f in zip(all_meta, files)]
     efield_in_legend = len(set(chem_labels)) < len(chem_labels)
-
     if efield_in_legend:
-        labels = [f"{c}  |  E={e} eV/Å" if e else c
+        labels = [f"{c} | E={e} eV/Ang" if e else c
                   for c, e in zip(chem_labels, efields)]
     else:
         labels = chem_labels
-
     return labels, efield_in_legend
-
 
 # ---------------------------------------------------------------------------
 # Output filename
@@ -195,11 +193,10 @@ def build_output_name(all_meta, norm_mode):
     formula : shared formula from metadata; 'mixed' if files differ
     norm    : abs | gnorm | enorm
     """
-    formulae  = [m.get('formula', '') for m in all_meta]
-    unique_f  = set(f for f in formulae if f)
-    formula   = list(unique_f)[0] if len(unique_f) == 1 else 'mixed'
+    formulae = [m.get('formula', '') for m in all_meta]
+    unique_f = set(f for f in formulae if f)
+    formula  = list(unique_f)[0] if len(unique_f) == 1 else 'mixed'
     return f"raman_compare_{formula}_{norm_mode}.png"
-
 
 # ---------------------------------------------------------------------------
 # Argument parser
@@ -248,7 +245,6 @@ def parse_args():
                    help='Output PNG (default: raman_compare_<formula>_<norm>.png)')
     return p.parse_args()
 
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -259,7 +255,7 @@ def main():
     if not files:
         raise SystemExit("No input files found.")
 
-    # ── Resolve normalisation mode ────────────────────────────────────────────
+    # Resolve normalisation mode
     waterfall_mode = args.offset > 0
     if waterfall_mode and not args.normalize and not args.normalize_each:
         args.normalize_each = True
@@ -273,24 +269,25 @@ def main():
     for f in files:
         print(f"  {Path(f).name}")
 
-    # ── Load data ────────────────────────────────────────────────────────────
-    all_freqs, all_acts, all_meta = [], [], []
+    # Load data
+    all_freqs, all_acts, all_irreps, all_meta = [], [], [], []
     for f in files:
-        freqs, acts, meta = load_csv(f)
+        freqs, acts, irreps, meta = load_csv(f)
         all_freqs.append(freqs)
         all_acts.append(acts)
+        all_irreps.append(irreps)
         all_meta.append(meta)
 
-    # ── Frequency grid ───────────────────────────────────────────────────────
+    # Frequency grid
     freq_min = args.freq_min
     freq_max = args.freq_max or (max(fq.max() for fq in all_freqs) + 50.0)
-    x = np.linspace(freq_min, freq_max, 5000)
+    x        = np.linspace(freq_min, freq_max, 5000)
 
-    # ── Build absolute spectra ────────────────────────────────────────────────
+    # Build absolute spectra
     spectra = [build_spectrum(freqs, acts, x, args.gamma, freq_min, freq_max)
                for freqs, acts in zip(all_freqs, all_acts)]
 
-    # ── Apply normalisation ───────────────────────────────────────────────────
+    # Apply normalisation
     if args.normalize_each:
         spectra   = [s / s.max() if s.max() > 0 else s for s in spectra]
         y_label   = 'Intensity (normalised per spectrum)'
@@ -304,7 +301,7 @@ def main():
         y_label   = 'Raman Activity (arb. units, absolute)'
         norm_mode = 'abs'
 
-    # ── Legend labels — auto E-field disambiguation ───────────────────────────
+    # Legend labels -- auto E-field disambiguation
     auto_labels, efield_in_legend = build_legend_labels(all_meta, files)
     if args.labels:
         for i, lbl in enumerate(args.labels):
@@ -312,25 +309,22 @@ def main():
                 auto_labels[i] = lbl
     legend_labels = auto_labels
 
-    # ── Figure title ──────────────────────────────────────────────────────────
+    # Figure title
     if args.title:
         title_parts = [args.title]
     else:
-        formulae  = [m.get('formula', '') for m in all_meta]
-        unique_f  = set(f for f in formulae if f)
+        formulae    = [m.get('formula', '') for m in all_meta]
+        unique_f    = set(f for f in formulae if f)
         title_parts = [f"{list(unique_f)[0]} Raman Comparison"
                        if len(unique_f) == 1 else "Raman Spectra Comparison"]
+        if not efield_in_legend:
+            efields   = [get_efield(m, f) for m, f in zip(all_meta, files)]
+            unique_ef = set(e for e in efields if e)
+            if len(unique_ef) == 1:
+                title_parts.append(f"E = {list(unique_ef)[0]} eV/Ang")
+        title_parts.append(f"FWHM = {args.gamma} cm$^{{-1}}$")
 
-    # Only add shared E-field to title when it's NOT already in the legend
-    if not efield_in_legend:
-        efields   = [get_efield(m, f) for m, f in zip(all_meta, files)]
-        unique_ef = set(e for e in efields if e)
-        if len(unique_ef) == 1:
-            title_parts.append(f"E = {list(unique_ef)[0]} eV/Å")
-
-    title_parts.append(f"FWHM = {args.gamma} cm$^{{-1}}$")
-
-    # ── Plot ──────────────────────────────────────────────────────────────────
+    # Plot
     n     = len(files)
     fig_h = max(4.5, 2.5 + n * 0.9) if waterfall_mode else 4.5
     fig, ax = plt.subplots(figsize=(11, fig_h))
@@ -338,10 +332,11 @@ def main():
     prop_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
     colors      = [prop_colors[i % len(prop_colors)] for i in range(n)]
 
-    for i, (spectrum, freqs, acts, label, color) in enumerate(
-            zip(spectra, all_freqs, all_acts, legend_labels, colors)):
+    for i, (spectrum, freqs, acts, irreps, label, color) in enumerate(
+            zip(spectra, all_freqs, all_acts, all_irreps, legend_labels, colors)):
 
-        baseline = i * args.offset
+        baseline   = i * args.offset
+        has_irreps = any(lbl != '' for lbl in irreps)
 
         ax.plot(x, spectrum + baseline, lw=1.5, color=color, label=label, zorder=3)
         ax.fill_between(x, baseline, spectrum + baseline,
@@ -356,7 +351,7 @@ def main():
                     ax.vlines(f_val, baseline, baseline + h,
                               color=color, lw=0.5, alpha=0.4, zorder=1)
 
-        # Peak labels — waterfall mode only
+        # Peak labels -- waterfall mode only
         if show_labels:
             min_dist = max(int(5000 / (freq_max - freq_min) * 15), 1)
             peaks, _ = find_peaks(spectrum,
@@ -364,22 +359,27 @@ def main():
                                   distance=min_dist)
             top_peaks = sorted(peaks, key=lambda p: -spectrum[p])[:args.n_labels]
             for pk in top_peaks:
+                peak_freq = x[pk]
+                if has_irreps and len(freqs) > 0:
+                    closest_idx = int(np.argmin(np.abs(freqs - peak_freq)))
+                    irrep       = irreps[closest_idx]
+                    label_text  = f"{irrep}\n{peak_freq:.0f}"
+                else:
+                    label_text  = f"{peak_freq:.0f}"
                 ax.annotate(
-                    f'{x[pk]:.0f}',
-                    xy         = (x[pk], spectrum[pk] + baseline),
-                    xytext     = (0, 6),
-                    textcoords = 'offset points',
+                    label_text,
+                    xy=(peak_freq, spectrum[pk] + baseline),
+                    xytext=(0, 6), textcoords='offset points',
                     ha='center', va='bottom',
-                    fontsize=6.5, color=color,
-                )
+                    fontsize=6.5, color=color, linespacing=1.3)
 
-    # ── Axes formatting ───────────────────────────────────────────────────────
+    # Axes formatting
     ax.set_xlim(freq_min, freq_max)
     ax.set_ylim(bottom=0)
     ax.set_xlabel(r'Wavenumber (cm$^{-1}$)', fontsize=12)
     ax.set_ylabel(y_label, fontsize=11)
     ax.tick_params(direction='in', top=True, right=True)
-    ax.set_title("  |  ".join(title_parts), fontsize=11)
+    ax.set_title(" | ".join(title_parts), fontsize=11)
     ax.legend(fontsize=9, loc='upper right', framealpha=0.8,
               title="Composition", title_fontsize=9)
 
@@ -388,7 +388,6 @@ def main():
     fig.savefig(out_png, dpi=150)
     plt.close(fig)
     print(f"\nSaved: {out_png}")
-
 
 if __name__ == '__main__':
     main()
