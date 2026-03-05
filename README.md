@@ -1,7 +1,7 @@
 # RASCBEC - Raman Spectroscopy Calculation via Born Effective Charge
 
 > **This is a community fork** of the original
-> [RASCBEC](https://github.com/RZhang05/RASCBEC) by Rui Zhang et al.
+> [RASCBEC](https://github.com/rruuiizz/RASCBEC) by Rui Zhang et al.
 > The underlying physics and RASCBEC method are unchanged. This fork
 > refactors the scripts for practical use on large doped supercells, adds a
 > complete plotting pipeline, and introduces a multi-composition comparison
@@ -393,4 +393,4 @@ https://doi.org/10.1016/j.cpc.2024.109425
 ---
 
 *Fork maintained by [PhnRvTjN](https://github.com/PhnRvTjN).
-Original repository: [RZhang05/RASCBEC](https://github.com/RZhang05/RASCBEC).*
+Original repository: [RASCBEC]((https://github.com/rruuiizz/RASCBEC).*
