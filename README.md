@@ -77,7 +77,7 @@ RASCBEC/
 
 ## Workflow
 
-### 1 — Rotate POSCAR
+### 1 - Rotate POSCAR
 
 ```bash
 python rotate.py
@@ -96,7 +96,7 @@ Place the appropriate INCAR, KPOINTS, and POTCAR in each subdirectory
 (INCAR should set `EFIELD_PEAD`, `LCALCEPS = .TRUE.`; sign of the field
 is controlled per subdirectory in the INCAR, not the POSCAR).
 
-### 2 — Run 8 BEC Calculations
+### 2 - Run 8 BEC Calculations
 
 After VASP finishes, your working directory should look like:
 
@@ -146,7 +146,7 @@ intended field direction, the **inactive** EFIELD_PEAD components must be
 > (~1.4% for δ=1e-4 and E≈0.005 eV/Å). It does not cause catastrophic
 > error but is avoidable.
 
-### 3 — Generate Phonopy YAML Files  *(phonopy path only)*
+### 3 - Generate Phonopy YAML Files  *(phonopy path only)*
 
 `RASCBEC_phonopy.py` reads the phonopy YAML files directly — no
 intermediate conversion step is needed. Generate `qpoints.yaml` and
@@ -168,7 +168,7 @@ phonopy --irreps="0 0 0"           # generates irreps.yaml
 
 Skip this step entirely if you are using `RASCBEC_VASP.py`.
 
-### 4 — Compute Raman Activities
+### 4 - Compute Raman Activities
 
 **Phonopy eigenvectors** (frequencies in THz, un-mass-normalised):
 ```bash
@@ -205,7 +205,7 @@ raman_Na3PS4_E0.02.csv                   # undoped
 raman_Na3PS4_Ca0.125_Cl0.5_E0.02.csv    # Ca+Cl co-doped
 ```
 
-### 5 — Plot a Single Spectrum
+### 5 - Plot a Single Spectrum
 
 `plot_raman.py` is called automatically by both RASCBEC scripts but can
 also be run standalone:
@@ -215,7 +215,7 @@ python plot_raman.py --dat raman_Na3PS4_Ca0.125_Cl0.5_E0.02.csv
 python plot_raman.py --dat raman_Na3PS4_E0.02.csv --gamma 10 --freq-min 0 --freq-max 600
 ```
 
-### 6 — Compare Multiple Compositions
+### 6 - Compare Multiple Compositions
 
 ```bash
 # Waterfall (auto-normalises each, 10 peak labels per spectrum)
