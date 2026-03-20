@@ -31,6 +31,111 @@
 
 ---
 
+## `rotate.py` — Fixes vs. Original (`rotate_orig.py`)
+
+The following three bugs were fixed relative to the upstream `rotate.py`
+(authored by Rui Zhang, 2024-11-06):
+
+### Fix 1 — Incorrect rotation algebra (shearing bug)
+
+**Original:**
+```python
+lattice_rotated_x = rotation_x @ lattice_vectors
+```
+
+**Problem:** VASP POSCARs store lattice vectors as **row vectors** (one
+vector per row). The original code applied the rotation matrix on the
+**left**, which is the column-vector convention. For non-cubic cells
+(e.g., LLTO, Na₃PS₄ doped supercells) this silently shears and distorts
+the written cell, causing VASP to receive a non-rigid deformation of the
+lattice rather than a pure rotation. This can cause VASP to misclassify
+the electronic structure (e.g., fail to identify the system as insulating).
+
+**Fix:** For POSCAR row-vector storage, a rigid Cartesian rotation must
+be applied as:
+```python
+lattice_rotated = lattice_vectors @ R.T
+```
+This leaves fractional coordinates invariant and correctly rotates every
+lattice vector in Cartesian space without shearing.
+
+---
+
+### Fix 2 — Legacy folder output routed by detected row order
+
+**Original:** The three matrices `rotation_x`, `rotation_y`,
+`rotation_z` are named after the RASCBEC legacy branch labels, but their
+geometric action is label-shifted relative to the standard textbook
+Cartesian-axis convention (this is intentional in the original workflow).
+The outputs are written into fixed folders `x/`, `y/`, `z/` regardless
+of the actual orientation of the input POSCAR lattice vectors.
+
+**Problem:** If the input POSCAR rows are permuted — e.g., row a aligns
+with physical +y, row b with +z, and row c with +x — the wrong rigid
+rotation is written into each folder. In the example above, a physical
+x-rotation was written into `x/POSCAR` when it should have been written
+into `y/POSCAR` (because row a carries the y-axis component, so legacy
+`x` must receive the rotation about physical y).
+
+**Fix:** The corrected script:
+1. Detects which physical Cartesian axis each POSCAR row is closest to
+   using a cosine-similarity best-permutation search.
+2. Routes legacy folders by row order:
+   - `x/` receives the rigid rotation about the physical axis associated
+     with row a (row 1)
+   - `y/` receives the rigid rotation about the physical axis associated
+     with row b (row 2)
+   - `z/` receives the rigid rotation about the physical axis associated
+     with row c (row 3)
+
+**Example:** If the input POSCAR rows are `a → +y`, `b → +z`, `c → +x`,
+then `x/POSCAR` receives the physical-y rotation, `y/POSCAR` receives
+the physical-z rotation, and `z/POSCAR` receives the physical-x rotation.
+The RASCBEC legacy branch names `x`, `y`, `z` are fully preserved.
+
+---
+
+### Fix 3 — INCAR, KPOINTS, POTCAR, and *.sbatch auto-copy
+
+**Original:** Only writes POSCARs; user must manually copy all other
+VASP input files into each subdirectory.
+
+**Fix:** The corrected `rotate.py` automatically copies `INCAR`,
+`KPOINTS`, `POTCAR`, and any `*.sbatch` job-submission scripts (auto-
+discovered from the working directory or supplied explicitly) into all 8
+subdirectories. Flags available:
+
+| Flag | Behavior |
+|---|---|
+| `--incar`, `--kpoints`, `--potcar` | Override default paths |
+| `--sbatch FILE [FILE ...]` | Explicit sbatch list |
+| `--no-sbatch` | Suppress sbatch copying |
+
+---
+
+### Diagnostic output
+
+The corrected script prints the detected row-to-axis mapping and the
+resolved legacy routing on every run so you can verify the folder
+assignment before submitting VASP jobs:
+
+```
+Detected lattice-row orientation relative to Cartesian axes:
+  row 1 -> +y (alignment = 1.000000)
+  row 2 -> +z (alignment = 1.000000)
+  row 3 -> +x (alignment = 1.000000)
+Legacy folder routing derived from detected row order:
+  legacy x -> row 1 (+y) -> physical Cartesian y
+  legacy y -> row 2 (+z) -> physical Cartesian z
+  legacy z -> row 3 (+x) -> physical Cartesian x
+```
+
+Use `--strict-axis-report` to abort if any row-to-axis alignment score
+falls below the threshold set by `--axis-tol` (default: 0.90). This is
+recommended for oblique cells where the row-to-axis assignment is ambiguous.
+
+---
+
 ## Dependencies
 
 ```
@@ -244,6 +349,19 @@ raman_compare_Na3PS4_abs.png     # absolute overlaid
 ---
 
 ## CLI Reference
+
+### `rotate.py`
+
+| Argument | Default | Description |
+|---|---|---|
+| `--poscar` | `POSCAR` | Source POSCAR file |
+| `--incar` | `INCAR` | INCAR file to copy into each subdirectory |
+| `--kpoints` | `KPOINTS` | KPOINTS file to copy into each subdirectory |
+| `--potcar` | `POTCAR` | POTCAR file to copy into each subdirectory |
+| `--sbatch [FILE ...]` | auto-discover | *.sbatch files to copy; omit for auto-discovery, pass with no args to suppress |
+| `--no-sbatch` | — | Disable sbatch copying entirely |
+| `--axis-tol` | `0.90` | Cosine alignment threshold for row-to-axis reporting |
+| `--strict-axis-report` | — | Abort if row-to-axis alignment is weak or ambiguous |
 
 ### `RASCBEC_phonopy.py`
 
