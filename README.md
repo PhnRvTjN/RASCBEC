@@ -31,9 +31,9 @@
 
 ---
 
-## `rotate.py` — Fixes vs. Original (`rotate_orig.py`)
+## `rotate.py` — Fixes vs. Original
 
-The following three bugs were fixed relative to the upstream `rotate.py`
+The following two bugs were fixed relative to the upstream `rotate.py`
 (authored by Rui Zhang, 2024-11-06):
 
 ### Fix 1 — Incorrect rotation algebra (shearing bug)
@@ -61,41 +61,7 @@ lattice vector in Cartesian space without shearing.
 
 ---
 
-### Fix 2 — Legacy folder output routed by detected row order
-
-**Original:** The three matrices `rotation_x`, `rotation_y`,
-`rotation_z` are named after the RASCBEC legacy branch labels, but their
-geometric action is label-shifted relative to the standard textbook
-Cartesian-axis convention (this is intentional in the original workflow).
-The outputs are written into fixed folders `x/`, `y/`, `z/` regardless
-of the actual orientation of the input POSCAR lattice vectors.
-
-**Problem:** If the input POSCAR rows are permuted — e.g., row a aligns
-with physical +y, row b with +z, and row c with +x — the wrong rigid
-rotation is written into each folder. In the example above, a physical
-x-rotation was written into `x/POSCAR` when it should have been written
-into `y/POSCAR` (because row a carries the y-axis component, so legacy
-`x` must receive the rotation about physical y).
-
-**Fix:** The corrected script:
-1. Detects which physical Cartesian axis each POSCAR row is closest to
-   using a cosine-similarity best-permutation search.
-2. Routes legacy folders by row order:
-   - `x/` receives the rigid rotation about the physical axis associated
-     with row a (row 1)
-   - `y/` receives the rigid rotation about the physical axis associated
-     with row b (row 2)
-   - `z/` receives the rigid rotation about the physical axis associated
-     with row c (row 3)
-
-**Example:** If the input POSCAR rows are `a → +y`, `b → +z`, `c → +x`,
-then `x/POSCAR` receives the physical-y rotation, `y/POSCAR` receives
-the physical-z rotation, and `z/POSCAR` receives the physical-x rotation.
-The RASCBEC legacy branch names `x`, `y`, `z` are fully preserved.
-
----
-
-### Fix 3 — INCAR, KPOINTS, POTCAR, and *.sbatch auto-copy
+### Fix 2 — INCAR, KPOINTS, POTCAR, and *.sbatch auto-copy
 
 **Original:** Only writes POSCARs; user must manually copy all other
 VASP input files into each subdirectory.
