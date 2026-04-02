@@ -70,6 +70,22 @@ import matplotlib.pyplot as plt
 from scipy.signal import find_peaks
 
 # ---------------------------------------------------------------------------
+# High-contrast colour palette (9 colours, colorblind-friendly)
+# Okabe-Ito extended: avoids yellow-on-white; designed for scientific plots.
+# ---------------------------------------------------------------------------
+HIGH_CONTRAST_COLORS = [
+    '#0072B2',  # Blue
+    '#D55E00',  # Vermillion
+    '#009E73',  # Bluish Green
+    '#E69F00',  # Amber/Orange
+    '#CC79A7',  # Reddish Purple / Pink
+    '#56B4E9',  # Sky Blue
+    '#000000',  # Black
+    '#8B0000',  # Dark Red
+    '#4B0082',  # Indigo
+]
+
+# ---------------------------------------------------------------------------
 # Lorentzian broadening
 # ---------------------------------------------------------------------------
 
@@ -329,8 +345,7 @@ def main():
     fig_h = max(4.5, 2.5 + n * 0.9) if waterfall_mode else 4.5
     fig, ax = plt.subplots(figsize=(11, fig_h))
 
-    prop_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
-    colors      = [prop_colors[i % len(prop_colors)] for i in range(n)]
+    colors = [HIGH_CONTRAST_COLORS[i % len(HIGH_CONTRAST_COLORS)] for i in range(n)]
 
     for i, (spectrum, freqs, acts, irreps, label, color) in enumerate(
             zip(spectra, all_freqs, all_acts, all_irreps, legend_labels, colors)):
@@ -371,21 +386,36 @@ def main():
                     xy=(peak_freq, spectrum[pk] + baseline),
                     xytext=(0, 6), textcoords='offset points',
                     ha='center', va='bottom',
-                    fontsize=6.5, color=color, linespacing=1.3)
+                    fontsize=6, color=color, linespacing=1.0)
 
     # Axes formatting
     ax.set_xlim(freq_min, freq_max)
     ax.set_ylim(bottom=0)
     ax.set_xlabel(r'Wavenumber (cm$^{-1}$)', fontsize=12)
-    ax.set_ylabel(y_label, fontsize=11)
+    ax.set_ylabel(y_label, fontsize=12)
     ax.tick_params(direction='in', top=True, right=True)
-    ax.set_title(" | ".join(title_parts), fontsize=11)
-    ax.legend(fontsize=9, loc='upper right', framealpha=0.8,
-              title="Composition", title_fontsize=9)
-
-    fig.tight_layout()
+    ax.set_title(" | ".join(title_parts), fontsize=12, fontweight='bold')
+    # Legend: outside the axes in waterfall mode to avoid overlapping spectra
+    if waterfall_mode:
+        leg = ax.legend(
+            fontsize=8,
+            loc='upper left',
+            bbox_to_anchor=(1.01, 1),
+            borderaxespad=0,
+            framealpha=0.8,
+            title="Dopant Composition",
+            title_fontsize=10,
+            labelspacing=2.0,
+        )
+        fig.tight_layout()
+        # Shrink the axes to make room for the outside legend
+        fig.subplots_adjust(right=0.75)
+    else:
+        ax.legend(fontsize=8, loc='upper right', framealpha=0.8,
+                  title="Dopant Composition", title_fontsize=10)
+        fig.tight_layout()
     out_png = args.out or build_output_name(all_meta, norm_mode)
-    fig.savefig(out_png, dpi=150)
+    fig.savefig(out_png, dpi=300)
     plt.close(fig)
     print(f"\nSaved: {out_png}")
 
