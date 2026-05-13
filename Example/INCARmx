@@ -1,0 +1,23 @@
+System = GeO2
+
+PREC = Accurate
+ENCUT = 520
+LREAL = .FALSE.
+ISTART = 1
+#ICHARG = 1
+
+
+EDIFF = 1E-7
+ISMEAR = 0
+SIGMA = 0.04
+
+ISYM = -1
+LWAVE = F
+LAECHG = F
+LCHARG = F
+
+EFIELD_PEAD = -0.1414 0.0 0.0
+LCALCEPS = .TRUE.
+
+ALGO = Normal
+
