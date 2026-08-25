@@ -350,7 +350,7 @@ def main():
     for i, (spectrum, freqs, acts, irreps, label, color) in enumerate(
             zip(spectra, all_freqs, all_acts, all_irreps, legend_labels, colors)):
 
-        baseline   = i * args.offset
+        baseline = (n - 1 - i) * args.offset
         has_irreps = any(lbl != '' for lbl in irreps)
 
         ax.plot(x, spectrum + baseline, lw=1.5, color=color, label=label, zorder=3)
