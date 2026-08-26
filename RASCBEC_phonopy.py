@@ -52,7 +52,7 @@ raman_<chem>_E<E>.csv / .png
 
 Examples:
 undoped Na3PS4, E=0.02  -> raman_Na3PS4_E0.02.csv
-Ca+Cl co-doped Na3PS4   -> raman_Na3PS4_Ca0.125_Cl0.5_E0.02.csv
+Ca+Cl co-doped Na3PS4   -> raman_Na3PS4_Ca0.125_Cl0.0625_E0.02.csv
 
 Dopant fractions are computed from actual supercell counts as
 x = n_dopant / n_ref, where n_ref is the count of the least-abundant
@@ -60,7 +60,7 @@ host species (stoichiometric coefficient = 1 in the ideal formula).
 
 CSV metadata header (parsed by compare_raman.py):
 # Formula: Na3PS4
-# Dopants: Ca(x=0.125)/Cl(x=0.5)   <- omitted if undoped
+# Dopants: Ca(x=0.125)/Cl(x=0.0625)   <- omitted if undoped
 # E_field: 0.02
 # Mode,Freq_cm-1,Activity,Irrep
 0001,<freq>,<activity>,A1
@@ -70,7 +70,7 @@ Dependencies: argparse, pathlib, numpy, yaml, pymatgen, plot_raman
 
 Usage:
 python RASCBEC_phonopy.py                          # all defaults
-python RASCBEC_phonopy.py --E 0.02 --gamma 15
+python RASCBEC_phonopy.py --E 0.02 --gamma 0.2
 python RASCBEC_phonopy.py --phonon-yaml mesh.yaml
 python RASCBEC_phonopy.py --irreps irreps.yaml
 python RASCBEC_phonopy.py --no-plot
@@ -124,8 +124,9 @@ def parse_args():
     p.add_argument('--E', type=float, default=None,
                    help='EFIELD_PEAD magnitude in eV/Ang. If omitted, auto-read from '
                         './1/OUTCAR (the unscaled reference calculation).')
-    p.add_argument('--gamma', type=float, default=10.0,
-                   help='Lorentzian FWHM in cm-1 for spectral broadening (default: 10.0)')
+    p.add_argument('--gamma', type=float, default=0.25,
+                   help='Lorentzian FWHM in THz for spectral broadening (default: 0.25);'
+                        'converted to cm-1 internally via THZCM1.')
     p.add_argument('--freq-min', type=float, default=0.0,
                    help='Lower x-axis limit of plot in cm-1 (default: 0)')
     p.add_argument('--freq-max', type=float, default=None,
@@ -728,7 +729,7 @@ def build_plot_title(formula, dopants_str, E, gamma):
     title : str
     """
     chem_part = f"{formula} [{dopants_str} doped]" if dopants_str else formula
-    return f"{chem_part} | E = {E} eV/Ang | FWHM = {gamma} cm$^{{-1}}$"
+    return f"{chem_part}\nE = {E} eV/Ang | FWHM = {gamma} cm$^{{-1}}$"
 
 # ===========================================================================
 # IX. Main orchestrator
@@ -788,11 +789,11 @@ def main():
 
     # --- 9. Plot ---
     if not args.no_plot:
-        title = build_plot_title(formula, dopants_str, E, args.gamma)
+        title = build_plot_title(formula, dopants_str, E, args.gamma * THZCM1)
         plot_raman_spectrum(
             dat_file = out_csv,
             out_png  = out_png,
-            gamma    = args.gamma,
+            gamma    = args.gamma * THZCM1,
             freq_min = args.freq_min,
             freq_max = args.freq_max,
             sticks   = not args.no_sticks,

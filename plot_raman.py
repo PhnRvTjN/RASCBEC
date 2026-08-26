@@ -46,7 +46,7 @@ from scipy.signal import find_peaks
 
 STICK_A = 0.6    # stick alpha (pre-broadened calculated Raman activity)
 STICK_LW = 0.8   # stick linewidth
-THZ2CM1 = 33.356409519815204  # 1 THz in cm^-1 (c = 2.99792458e10 cm/s)
+THZCM1 = 33.356409519815204  # 1 THz in cm^-1 (c = 2.99792458e10 cm/s)
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +392,7 @@ if __name__ == '__main__':
                    help='Output PNG filename (default: dat stem + .png)')
     p.add_argument('--gamma', type=float, default=0.25,
                    help='Lorentzian FWHM in THz (default: 0.25 THz); converted '
-                        'to cm-1 internally via THZ2CM1.')
+                        'to cm-1 internally via THZCM1.')
     p.add_argument('--freq-min', type=float, default=0.0,
                    help='Lower x-axis limit in cm-1 (default: 0)')
     p.add_argument('--freq-max', type=float, default=None,
@@ -410,7 +410,7 @@ if __name__ == '__main__':
     plot_raman_spectrum(
         dat_file=dat_file,
         out_png=args.out,
-        gamma=args.gamma * THZ2CM1,
+        gamma=args.gamma * THZCM1,
         freq_min=args.freq_min,
         freq_max=args.freq_max,
         sticks=not args.no_sticks,
