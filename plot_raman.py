@@ -8,7 +8,7 @@ Also importable:
 from plot_raman import plot_raman_spectrum
 
 When called from RASCBEC_phonopy.py, dat_file and out_png are always passed
-explicitly and use chemistry-based names (e.g. raman_Na3PS4_Ca0.125_E0.02.csv).
+explicitly and use chemistry-based names (e.g. Na3PS4_Ca12-C06_E0.02.csv).
 
 When run standalone, --dat is optional: if omitted, the single CSV file in
 the current working directory is used (exits with an error if none or
@@ -23,10 +23,10 @@ show the symmetry label on the line above the frequency value.
 
 Usage:
 python plot_raman.py   # auto-uses the only CSV in the cwd
-python plot_raman.py --dat raman_Na3PS4_Ca0.125_E0.02.csv
-python plot_raman.py --dat raman_Na3PS4_E0.02.csv --gamma 0.2
-python plot_raman.py --dat raman_Na3PS4_E0.02.csv --freq-min 50 --freq-max 600
-python plot_raman.py --dat raman_Na3PS4_E0.02.csv --no-sticks --n-labels 5
+python plot_raman.py --dat Na3PS4_Ca12-Cl06_E0.02.csv
+python plot_raman.py --dat Na3PS4_E0.02.csv --gamma 0.2
+python plot_raman.py --dat Na3PS4_E0.02.csv --freq-min 50 --freq-max 600
+python plot_raman.py --dat Na3PS4_E0.02.csv --no-sticks --n-labels 5
 python plot_raman.py --help
 """
 
@@ -180,11 +180,14 @@ def _read_csv_metadata(dat_file):
     """
     Read metadata from commented CSV header lines written by RASCBEC_phonopy.py.
 
+    Recognized keys: Formula, Dopants, File_Label, E_field. Older CSVs that
+    predate the File_Label header line simply omit that key.
+
     Returns
     -------
-    meta : dict with keys 'formula', 'dopants', 'E_field'
+    meta : dict with keys 'formula', 'dopants', 'file_label', 'E_field'
     """
-    meta = {'formula': None, 'dopants': '', 'E_field': None}
+    meta = {'formula': None, 'dopants': '', 'file_label': '', 'E_field': None}
 
     with open(dat_file) as fh:
         for line in fh:
@@ -197,6 +200,8 @@ def _read_csv_metadata(dat_file):
                 meta['formula'] = s.split(':', 1)[1].strip()
             elif s.startswith('Dopants:'):
                 meta['dopants'] = s.split(':', 1)[1].strip()
+            elif s.startswith('File_Label:'):
+                meta['file_label'] = s.split(':', 1)[1].strip()
             elif s.startswith('E_field:'):
                 val = s.split(':', 1)[1].strip()
                 try:
@@ -221,16 +226,20 @@ def _build_plot_title_from_csv(dat_file, gamma):
     if not formula:
         return Path(dat_file).stem
 
-    chem_part = f"{formula} [{dopants} doped]" if dopants else formula
+    chem_part = (
+        f"{formula} | {dopants}"
+        if dopants and dopants != "Undoped"
+        else formula
+    )
 
     if E is not None:
-        return f"{chem_part}\nE = {E:g} eV/Ang | FWHM = {gamma:g} cm$^{{-1}}$"
-    return f"{chem_part} | FWHM = {gamma:g} cm$^{{-1}}$"
+        return f"{chem_part}\nE = {E:g} eV/Å | FWHM = {gamma:.4f} cm$^{{-1}}$"
+    return f"{chem_part} | FWHM = {gamma:.4f} cm$^{{-1}}$"
 
 
 def plot_raman_spectrum(dat_file,
                         out_png=None,
-                        gamma=5.0,
+                        gamma=0.25,
                         freq_min=0.0,
                         freq_max=None,
                         sticks=True,
@@ -385,7 +394,7 @@ if __name__ == '__main__':
         description='Plot Raman spectrum from RASCBEC CSV output.'
     )
     p.add_argument('--dat', default=None,
-                   help='Input CSV file (e.g. raman_Na3PS4_Ca0.125_E0.02.csv). '
+                   help='Input CSV file (e.g. Na3PS4_Ca0.125_E0.02.csv). '
                         'If omitted, the single CSV in the current directory is used '
                         '(errors if none or multiple are found).')
     p.add_argument('--out', default=None,

@@ -10,7 +10,7 @@ Patches: auto atomic-mass lookup via pymatgen,
 variable mode count (filtered imaginary and acoustic modes),
 subdirectory-based OUTCAR paths (./1/OUTCAR, ./m1/OUTCAR, ...),
 chemistry-based output filenames derived from POSCAR composition,
-CSV metadata header (formula, dopants, E-field),
+CSV metadata header (formula, dopants, file label, E-field),
 plot output option,
 auto-generated informative plot title,
 direct phonopy YAML input (qpoints.yaml or mesh.yaml + irreps.yaml),
@@ -48,19 +48,25 @@ E-field magnitude is read automatically from ./1/OUTCAR (EFIELD_PEAD tag).
 Override with --E only if you want to force a specific value.
 
 Output naming (chemistry-based, derived from POSCAR; no directory tags):
-raman_<chem>_E<E>.csv / .png
+<formula>[_<dopantpart>... ]_E<E>.csv / .png
 
 Examples:
-undoped Na3PS4, E=0.02  -> raman_Na3PS4_E0.02.csv
-Ca+Cl co-doped Na3PS4   -> raman_Na3PS4_Ca0.125_Cl0.0625_E0.02.csv
+undoped Na3PS4, E=0.02  -> Na3PS4_E0.02.csv
+Ca+Cl co-doped Na3PS4   -> Na3PS4_Ca01-Cl06_E0.02.csv
 
-Dopant fractions are computed from actual supercell counts as
-x = n_dopant / n_ref, where n_ref is the count of the least-abundant
-host species (stoichiometric coefficient = 1 in the ideal formula).
+Dopant roles (--bas / --dops)
+-----------------------------
+Explicit --bas / --dops values take precedence over automatic inference
+(dopants = species below 5 % of the supercell atoms, DOPANT_THRESHOLD).
+When --bas is given, it defines the host-formula coefficient of one AND the
+denominator for the dopant x-values (x = n_dopant / n_bas), e.g.
+Li5La9Ti16O48 --bas Ti -> Li0.31La0.56TiO3. When omitted, the
+least-abundant host species is used as the legacy reference.
 
-CSV metadata header (parsed by compare_raman.py):
+CSV metadata header (parsed by compare_raman.py & plot_raman.py):
 # Formula: Na3PS4
-# Dopants: Ca(x=0.125)/Cl(x=0.0625)   <- omitted if undoped
+# Dopants: Ca=0.125 Cl=0.0625   <- omitted if undoped
+# File_Label: Ca01-Cl06         <- omitted if undoped
 # E_field: 0.02
 # Mode,Freq_cm-1,Activity,Irrep
 0001,<freq>,<activity>,A1
@@ -94,7 +100,7 @@ from plot_raman import plot_raman_spectrum
 
 THZCM1 = 33.3564095198       # THz -> cm-1
 THZMEV  = 4.13566553853599   # THz -> meV
-EPS0    = 55.2635e-4         # e0 in e^2 / (eV*Ang)
+EPS0    = 55.2635e-4         # e0 in e^2 / (eV*Å)
 KB_T    = 8.617333e-2 * 298  # k_B T at 298 K, meV
 
 # Species whose fractional count in the supercell falls below this threshold
@@ -122,7 +128,7 @@ def parse_args():
     p = argparse.ArgumentParser(
         description='RASCBEC Raman activity calculator (phonopy YAML input).')
     p.add_argument('--E', type=float, default=None,
-                   help='EFIELD_PEAD magnitude in eV/Ang. If omitted, auto-read from '
+                   help='EFIELD_PEAD magnitude in eV/Å. If omitted, auto-read from '
                         './1/OUTCAR (the unscaled reference calculation).')
     p.add_argument('--gamma', type=float, default=0.25,
                    help='Lorentzian FWHM in THz for spectral broadening (default: 0.25);'
@@ -137,16 +143,25 @@ def parse_args():
     p.add_argument('--irreps', default='irreps.yaml',
                    help='Phonopy irreps.yaml file with symmetry labels '
                         '(default: irreps.yaml)')
+    p.add_argument('--bas', default=None,
+                   help='Explicit host basis species. It is normalized to '
+                        'coefficient one in the host formula and defines the '
+                        'denominator for dopant x-values, e.g. Ti. If omitted, '
+                        'the least-abundant host species is used.')
+    p.add_argument('--dops', nargs='+', default=None,
+                   help='Explicit dopant species list, e.g. --dops Ca Cl. '
+                        'Overrides automatic dopant inference '
+                        '(species below 5 %% of the supercell atoms).')
     p.add_argument('--no-plot', action='store_true',
                    help='Skip plot generation; write CSV only')
     p.add_argument('--no-sticks', action='store_true',
                    help='Omit stick spectrum from plot')
-    p.add_argument('--n-labels', type=int, default=20,
-                   help='Number of peak labels to annotate on plot (default: 20)')
+    p.add_argument('--n-labels', type=int, default=10,
+                   help='Number of peak labels to annotate on plot (default: 10)')
     p.add_argument('--out-csv', default=None,
-                   help='Output CSV path (default: raman_<chem>_E<E>.csv)')
+                   help='Output CSV path (default: <chem>_E<E>.csv)')
     p.add_argument('--out-png', default=None,
-                   help='Output PNG path (default: raman_<chem>_E<E>.png)')
+                   help='Output PNG path (default: <chem>_E<E>.png)')
     return p.parse_args()
 
 # ===========================================================================
@@ -164,7 +179,7 @@ def structure_info(poscar='POSCAR'):
     The POSCAR is read line-by-line following the standard format:
     line 1   : comment
     line 2   : universal scale factor
-    lines 3-5: lattice vectors (Ang)
+    lines 3-5: lattice vectors (Å)
     line 6   : element symbols
     line 7   : atom counts per element
     line 8+  : coordinate type and positions
@@ -178,7 +193,7 @@ def structure_info(poscar='POSCAR'):
 
     Returns
     -------
-    vol          : float      -- unit-cell volume (Ang^3)
+    vol          : float      -- unit-cell volume (Å^3)
     species_n    : ndarray    -- atom counts per species, shape (ntype,)
     atomic_mass  : list       -- atomic masses (amu) per species
     ntype        : int        -- number of distinct species
@@ -230,7 +245,7 @@ def read_efield_pead(outcar_path='./1/OUTCAR'):
 
     Returns
     -------
-    E : float -- electric field magnitude in eV/Ang
+    E : float -- electric field magnitude in eV/Å
 
     Raises
     ------
@@ -352,7 +367,7 @@ def charge_derivative(charge1, chargem1, chargex, chargey, chargez,
         BEC tensor for the atom under each E-field direction.
         '1'/'m1'             = unrotated field +/-;
         'x'/'mx', 'y'/'my', 'z'/'mz' = 45-degree-rotated field +/-.
-    E : float -- electric field magnitude (eV/Ang)
+    E : float -- electric field magnitude (eV/Å)
 
     Returns
     -------
@@ -393,7 +408,7 @@ def build_charge_derivatives(charges, nat, E):
     ----------
     charges : dict -- output of load_bec_charges()
     nat     : int  -- number of atoms
-    E       : float -- electric field magnitude (eV/Ang)
+    E       : float -- electric field magnitude (eV/Å)
 
     Returns
     -------
@@ -585,18 +600,19 @@ def compute_raman_activities(dq, eigvecs, nat, n_modes, atomic_mass, species_n):
 # ===========================================================================
 
 def write_csv(out_csv, eigvals, activity, irrep_labels,
-              formula='', dopants='', E=None):
+              formula='', dopants='', file_label='', E=None):
     """
     Write Raman frequencies, activities, and irrep labels to a CSV with a
     metadata header.
 
-    The header lines are parsed by compare_raman.py for automatic labelling
-    and plot titling.
+    The header lines are parsed by compare_raman.py and plot_raman.py for
+    automatic labelling and plot titling.
 
     File format
     -----------
     # Formula: <formula>
-    # Dopants: <dopants>    <- omitted if undoped
+    # Dopants: <dopants>    <- omitted if undoped, e.g. 'Ca=0.125 Cl=0.0625'
+    # File_Label: <file_label>   <- omitted if undoped, e.g. 'Ca01-Cl06'
     # E_field: <E>
     # Mode,Freq_cm-1,Activity,Irrep
     0001,<freq>,<activity>,<label>
@@ -609,13 +625,18 @@ def write_csv(out_csv, eigvals, activity, irrep_labels,
     activity     : list       -- Raman activities, length n_modes
     irrep_labels : list[str]  -- symmetry label per mode, length n_modes
     formula      : str        -- ideal host formula, e.g. 'Na3PS4'
-    dopants      : str        -- dopant descriptor, e.g. 'Ca(x=0.125)/Cl(x=0.5)'
+    dopants      : str        -- dopant descriptor, e.g. 'Ca=0.125 Cl=0.0625'
+                                 ('' or 'Undoped' when no dopants)
+    file_label   : str        -- filesystem-safe dopant label, e.g. 'Ca01-Cl06'
+                                 ('' when undoped)
     E            : float      -- electric field magnitude used (written to header)
     """
     with open(out_csv, 'w') as fh:
         fh.write(f"# Formula: {formula}\n")
-        if dopants:
+        if dopants and dopants != "Undoped":
             fh.write(f"# Dopants: {dopants}\n")
+        if file_label:
+            fh.write(f"# File_Label: {file_label}\n")
         if E is not None:
             fh.write(f"# E_field: {E:g}\n")
         fh.write("# Mode,Freq_cm-1,Activity,Irrep\n")
@@ -626,110 +647,283 @@ def write_csv(out_csv, eigvals, activity, irrep_labels,
 
 # ===========================================================================
 # VIII. Chemistry metadata and naming
+# (ported from phonon_mode_pred.py: safe_name, host_formula,
+#  validate_chemistry_roles, build_chemistry_metadata)
 # ===========================================================================
 
-def identify_dopants(species_names, species_n, threshold=DOPANT_THRESHOLD):
+def safe_name(text):
+    """Return a filename-safe label by replacing spaces & removing selected punctuation."""
+    safe = text.replace(" ", "_").replace("/", "_")
+    for char in "()=:":
+        safe = safe.replace(char, "")
+    return safe
+
+def split_dops(species_names, species_n, threshold=DOPANT_THRESHOLD):
     """
-    Classify each species as host or dopant based on its supercell abundance.
+    Infer dopant species automatically from low atomic count fraction.
 
-    Species whose fraction of total atoms falls below *threshold* are treated
-    as dopants. The default (0.05) correctly identifies substituents present
-    at a few percent or less while retaining all framework species.
-
-    Parameters
-    ----------
-    species_names : list[str]
-    species_n     : ndarray of ints
-    threshold     : float -- fractional abundance cutoff
+    Any species whose atom count is below ``threshold`` of the total atom
+    count is classified as a dopant; everything else is classified as host.
+    This heuristic works well for dilute-substitution sulfide systems
+    (e.g. Na3PS4:Ca/Cl) but should be bypassed via ``--dops`` for systems
+    where dopant concentration is not dilute or role assignment is
+    otherwise ambiguous (e.g. some LLTO compositions).
 
     Returns
     -------
-    host_names   : list[str]
-    host_n       : list[int]
-    dopant_names : list[str]
-    dopant_n     : list[int]
+    tuple
+        (host_names, host_counts, dop_names, dop_counts)
     """
     total = float(sum(species_n))
-    host_names, host_n, dopant_names, dopant_n = [], [], [], []
-    for name, n in zip(species_names, species_n):
-        if n / total < threshold:
-            dopant_names.append(name)
-            dopant_n.append(int(n))
+    host_names, host_n, dop_names, dop_n = [], [], [], []
+    for name, count in zip(species_names, species_n):
+        if total > 0 and count / total < threshold:
+            dop_names.append(name)
+            dop_n.append(int(count))
         else:
             host_names.append(name)
-            host_n.append(int(n))
-    return host_names, host_n, dopant_names, dopant_n
+            host_n.append(int(count))
+    return host_names, host_n, dop_names, dop_n
 
-def approximate_host_formula(host_names, host_n):
+def host_formula(host_names, host_n, basis_species=None):
     """
-    Recover the ideal stoichiometric formula from doping-perturbed host counts.
+    Build a compact host-composition label with a consistent normalization.
 
-    Divides all host counts by the smallest host count and rounds to the
-    nearest integer. This anchors the normalisation to the species with
-    stoichiometric coefficient 1 in the ideal formula (e.g. P in Na3PS4).
+    When ``basis_species`` is supplied, all host stoichiometric coefficients
+    are divided by that species' count, so its displayed coefficient is one.
+    The same count is used by :func:`build_chemistry_metadata` to report
+    dopant x-values. For example, ``Li5 La9 Ti16 O48`` with ``--bas Ti`` is
+    rendered as ``Li0.31La0.56TiO3``. If no basis is supplied, the legacy
+    behavior is retained: normalize to the least-abundant host species and
+    round to nearby integers.
 
-    Parameters
-    ----------
-    host_names : list[str]
-    host_n     : list[int]
-
-    Returns
-    -------
-    formula : str -- e.g. 'Na3PS4'
+    This produces a readable analysis label rather than a general-purpose
+    crystallographic formula reduction.
     """
-    min_n  = min(host_n)
-    ratios = [max(1, round(n / min_n)) for n in host_n]
-    return ''.join(f"{name}{r if r > 1 else ''}" for name, r in zip(host_names, ratios))
-
-def build_chemistry_metadata(species_names, species_n):
-    """
-    Derive all chemistry-based labels from the supercell composition alone.
-
-    Dopant fractions are computed as x_dopant = n_dopant / n_ref, where
-    n_ref is the count of the least-abundant host species.
-
-    Parameters
-    ----------
-    species_names : list[str]
-    species_n     : ndarray
-
-    Returns
-    -------
-    formula     : str -- e.g. 'Na3PS4'
-    dopants_str : str -- e.g. 'Ca(x=0.125)/Cl(x=0.5)' ('' if undoped)
-    file_label  : str -- e.g. 'Na3PS4_Ca0.125_Cl0.5'   (no parentheses)
-    """
-    host_names, host_n, dopant_names, dopant_n = identify_dopants(species_names, species_n)
-    formula   = approximate_host_formula(host_names, host_n)
-    ref_count = min(host_n)
-
-    if dopant_names:
-        fracs       = {name: n / ref_count for name, n in zip(dopant_names, dopant_n)}
-        dopants_str = '/'.join(f"{name}(x={x:.3g})" for name, x in fracs.items())
-        file_label  = '_'.join([formula] + [f"{name}{x:.3g}" for name, x in fracs.items()])
+    if not host_names or not host_n:
+        raise ValueError("Host species could not be determined from the composition.")
+    count_map = {name: int(count) for name, count in zip(host_names, host_n)}
+    if basis_species is None:
+        ref = float(min(host_n))
+        coefficients = [float(max(1, round(count / ref))) for count in host_n]
     else:
-        dopants_str = ''
-        file_label  = formula
+        if basis_species not in count_map:
+            raise ValueError(
+                f"Basis species '{basis_species}' is not a host species; "
+                "it cannot define the host formula.")
+        ref = float(count_map[basis_species])
+        coefficients = [count_map[name] / ref for name in host_names]
 
-    return formula, dopants_str, file_label
+    parts = []
+    for name, coefficient in zip(host_names, coefficients):
+        if np.isclose(coefficient, round(coefficient), atol=1e-8):
+            integer = int(round(coefficient))
+            parts.append(name if integer == 1 else f"{name}{integer}")
+        else:
+            parts.append(f"{name}{coefficient:.2f}".rstrip("0").rstrip("."))
+    return "".join(parts)
 
-def build_plot_title(formula, dopants_str, E, gamma):
+def validate_chemistry_roles(species_names, bas_species, dop_species):
     """
-    Build an informative plot title from chemistry strings and run parameters.
+    Validate chemistry-role overrides before they are consumed downstream.
+
+    This is the single validation guard through which every explicit CLI
+    role override (--bas / --dops) must pass. It exists to catch
+    misconfiguration in non-sulfide chemistries (e.g. LLTO) where role
+    assignment is not automatic, before any downstream computation,
+    filename, or plot silently uses a wrong or inconsistent assignment.
+
+    Checks performed
+    -----------------
+    - ``bas_species`` and every entry of ``dop_species`` must be a
+      non-empty string present in ``species_names`` (when provided).
+    - ``dop_species`` must not contain duplicate entries.
+    - ``bas_species`` cannot also appear in ``dop_species`` (the
+      concentration reference should be a host species, not a dopant).
+
+    Raises
+    ------
+    ValueError
+        If any of the checks above fail, with a message identifying which
+        role(s) are inconsistent.
+    """
+    species_set = set(species_names)
+    dop_species = list(dop_species) if dop_species else []
+
+    if bas_species is not None:
+        if not bas_species.strip():
+            raise ValueError("--bas cannot be an empty string.")
+        if bas_species not in species_set:
+            raise ValueError(
+                f"Basis species '{bas_species}' is not present in the structure "
+                f"(available species: {sorted(species_set)}).")
+
+    if dop_species:
+        if any(not sp.strip() for sp in dop_species):
+            raise ValueError("--dops entries cannot be empty strings.")
+        duplicates = sorted({sp for sp in dop_species if dop_species.count(sp) > 1})
+        if duplicates:
+            raise ValueError(f"--dops contains duplicate species: {sorted(duplicates)}.")
+
+    if bas_species is not None and bas_species in dop_species:
+        raise ValueError(
+            f"'{bas_species}' cannot be both the basis species & a dopant species.")
+
+def build_chemistry_metadata(species_names, species_n,
+                             bas_species=None, dop_species=None):
+    """
+    Resolve host, dopant & basis metadata for a structure.
+
+    This function converts ordered species labels & counts into the
+    normalized chemistry-role dictionary used for naming, file labels,
+    plot titles, & the metadata stored in CSV headers.
+
+    Role resolution follows a strict precedence order. Explicit CLI
+    overrides are validated first and, when present, take priority. If
+    dopants are not supplied explicitly, they are inferred with
+    ``split_dops`` from low atomic fraction. When ``bas_species`` is
+    supplied, it defines both the dopant x-value denominator and a
+    host-formula coefficient of one. When it is omitted, the
+    least-abundant host species supplies the legacy reference.
 
     Parameters
     ----------
-    formula     : str   -- host formula
-    dopants_str : str   -- dopant descriptor ('' if undoped)
-    E           : float -- electric field magnitude (eV/Ang)
-    gamma       : float -- Lorentzian FWHM (cm-1)
+    species_names : list of str
+        Ordered species labels & per-species atom counts parsed from POSCAR.
+    species_n : ndarray
+        Atom count per species.
+    bas_species : str or None, optional
+        Species used as the concentration reference for dopant x-values.
+    dop_species : list of str or None, optional
+        Explicit dopant list. When provided, it fully overrides automatic
+        dopant inference.
+
+    Returns
+    -------
+    dict with keys
+        formula      : str -- e.g. 'Na3PS4'
+        dopants      : str -- e.g. 'Ca=0.125 Cl=0.0625' ('Undoped' if none)
+        file_label   : str -- dopant filename part, e.g. 'Ca01-Cl06'
+                              (empty string if undoped)
+        host_species : list of str
+        dop_species  : list of str
+        bas_species  : str or None -- resolved basis species
+
+    Raises
+    ------
+    ValueError
+        If any explicit role override is invalid or internally inconsistent.
+    """
+    validate_chemistry_roles(species_names, bas_species, dop_species)
+
+    species_count_map = {name: int(count) for name, count in zip(species_names, species_n)}
+    explicit_dops = list(dop_species) if dop_species else None
+
+    if explicit_dops is not None:
+        dop_names = list(explicit_dops)
+        dop_counts = [int(species_count_map.get(sp, 0)) for sp in dop_names]
+        host_names = [sp for sp in species_names if sp not in set(dop_names)]
+        host_counts = [species_count_map[sp] for sp in host_names]
+    else:
+        host_names, host_counts, dop_names, dop_counts = split_dops(
+            species_names, species_n)
+
+    if bas_species is not None:
+        resolved_bas_species = bas_species
+    elif host_names:
+        resolved_bas_species = host_names[int(np.argmin(host_counts))]
+    elif len(species_names):
+        resolved_bas_species = species_names[int(np.argmin(species_n))]
+    else:
+        resolved_bas_species = None
+
+    bas_count = (species_count_map[resolved_bas_species]
+                 if resolved_bas_species is not None else 1)
+    bas_count = max(int(bas_count), 1)
+
+    formula = (
+        host_formula(host_names, host_counts, basis_species=bas_species)
+        if host_names
+        else "Unknown"
+    )
+
+    # Preserve the exact CLI order: --dops Ca Cl
+    label_dops = list(explicit_dops) if explicit_dops is not None else list(dop_names)
+
+    fractions = {
+        name: float(species_count_map.get(name, 0)) / float(bas_count)
+        for name in label_dops
+    }
+
+    if label_dops:
+        dopants = (
+            "Undoped"
+            if not fractions or all(abs(x) < 1e-12 for x in fractions.values())
+            else " ".join(f"{name}={x:.3g}" for name, x in fractions.items())
+        )
+        # Always include every declared dopant, including zeros.
+        file_label = "-".join(
+            f"{name}{int(round(x * 100.0)):02d}"
+            for name, x in fractions.items()
+        )
+    else:
+        dopants = ""
+        file_label = ""
+
+    return {
+        "formula": formula,
+        "dopants": dopants,
+        "file_label": safe_name(file_label),
+        "host_species": host_names,
+        "dop_species": dop_names,
+        "bas_species": resolved_bas_species,
+    }
+
+def build_plot_title(chem, E, gamma):
+    """
+    Build an informative plot title from chemistry metadata and run parameters.
+
+    The chemistry fragment uses the phonon_mode_pred convention:
+    ``<formula> | <dopants>`` when doped, else ``<formula>``.
+
+    Parameters
+    ----------
+    chem    : dict  -- output of :func:`build_chemistry_metadata`
+    E       : float -- electric field magnitude (eV/Å)
+    gamma   : float -- Lorentzian FWHM (cm-1)
 
     Returns
     -------
     title : str
     """
-    chem_part = f"{formula} [{dopants_str} doped]" if dopants_str else formula
-    return f"{chem_part}\nE = {E} eV/Ang | FWHM = {gamma} cm$^{{-1}}$"
+    dopants = chem.get("dopants") or ""
+    chem_part = (
+        f"{chem['formula']} | {dopants}"
+        if dopants and dopants != "Undoped"
+        else chem["formula"]
+    )
+    return f"{chem_part}\nE = {E} eV/Å | FWHM = {gamma:.4f} cm$^{{-1}}$"
+
+def raman_filename(chem, E):
+    """
+    Build the chemistry-based Raman output stem (no extension).
+
+    Uses the host formula & the dopant-only filename part from
+    :func:`build_chemistry_metadata` (e.g. ``Ca01-Cl06``).
+
+    Parameters
+    ----------
+    chem : dict  -- output of :func:`build_chemistry_metadata`
+    E    : float -- electric field magnitude (eV/Å)
+
+    Returns
+    -------
+    str -- e.g. 'Na3PS4_Ca01-Cl06_E0.02' or 'Na3PS4_E0.02'
+    """
+    stem = f"{chem['formula']}"
+    if chem["file_label"]:
+        stem += f"_{chem['file_label']}"
+    return f"{stem}_E{E:g}"
 
 # ===========================================================================
 # IX. Main orchestrator
@@ -746,18 +940,23 @@ def main():
     # --- 2. Resolve electric field magnitude ---
     if args.E is not None:
         E = args.E
-        print(f"\nE-field : {E} eV/Ang (user-supplied)")
+        print(f"\nE-field : {E} eV/Å (user-supplied)")
     else:
         E = read_efield_pead(OUTCAR_MAP['1'])
-        print(f"\nE-field : {E} eV/Ang (auto-read from {OUTCAR_MAP['1']})")
+        print(f"\nE-field : {E} eV/Å (auto-read from {OUTCAR_MAP['1']})")
 
     # --- 3. Derive naming and metadata from POSCAR composition ---
-    formula, dopants_str, file_label = build_chemistry_metadata(species_names, species_n)
-    out_csv = args.out_csv or f"raman_{file_label}_E{E:g}.csv"
-    out_png = args.out_png or f"raman_{file_label}_E{E:g}.png"
+    chem = build_chemistry_metadata(
+        species_names, species_n,
+        bas_species=args.bas, dop_species=args.dops)
+    formula   = chem["formula"]
+    dopants   = chem["dopants"]
+    base_name = raman_filename(chem, E)
+    out_csv = args.out_csv or f"{base_name}.csv"
+    out_png = args.out_png or f"{base_name}.png"
     print(f"Formula : {formula}")
-    if dopants_str:
-        print(f"Dopants : {dopants_str}")
+    if dopants:
+        print(f"Dopants : {dopants}")
     print(f"Output  : {out_csv}")
     print("=" * 70)
 
@@ -785,11 +984,12 @@ def main():
 
     # --- 8. Write CSV ---
     write_csv(out_csv, eigvals, activity, irrep_labels,
-              formula=formula, dopants=dopants_str, E=E)
+              formula=formula, dopants=dopants,
+              file_label=chem["file_label"], E=E)
 
     # --- 9. Plot ---
     if not args.no_plot:
-        title = build_plot_title(formula, dopants_str, E, args.gamma * THZCM1)
+        title = build_plot_title(chem, E, args.gamma * THZCM1)
         plot_raman_spectrum(
             dat_file = out_csv,
             out_png  = out_png,
