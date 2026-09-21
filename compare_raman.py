@@ -577,7 +577,7 @@ def main():
             unique_ef = set(e for e in efields if e)
             if len(unique_ef) == 1:
                 title_line2_parts.append(f"E = {list(unique_ef)[0]} eV/Å")
-        title_line2_parts.append(f"FWHM = {gamma:.4f} cm$^{{-1}}$")
+        title_line2_parts.append(f"FWHM = {gamma:.2f} cm$^{{-1}}$")
         if not args.raw_activity:
             title_line2_parts.append(f"T = {args.temperature:g} K")
         else:

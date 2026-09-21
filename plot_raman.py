@@ -367,8 +367,8 @@ def _build_plot_title_from_csv(
 
     t_part = f" | T = {temperature:g} K" if not raw_activity else " | S(ν)"
     if E is not None:
-        return f"{chem_part}\nE = {E:g} eV/Å | FWHM = {gamma:.4f} cm$^{{-1}}${t_part}"
-    return f"{chem_part} | FWHM = {gamma:.4f} cm$^{{-1}}${t_part}"
+        return f"{chem_part}\nE = {E:g} eV/Å | FWHM = {gamma:.2f} cm$^{{-1}}${t_part}"
+    return f"{chem_part} | FWHM = {gamma:.2f} cm$^{{-1}}${t_part}"
 
 
 def plot_raman_spectrum(
