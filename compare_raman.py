@@ -601,14 +601,14 @@ def main():
 
         label_dy = float(spectrum.max()) * 0.2 if spectrum.max() > 0 else 0.0
         ax.text(
-            freq_min,
+            freq_max,
             baseline + label_dy,
             f"  {label}",
             color=color,
             fontsize=10,
             fontweight="bold",
             va="bottom",
-            ha="left",
+            ha="right",
             zorder=5)
 
         if args.sticks and freqs.size:
