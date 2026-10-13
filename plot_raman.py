@@ -357,6 +357,30 @@ def _parse_coefficient(token: str):
     return int(value) if value.is_integer() else value
 
 
+def _clean_coeff(value) -> float:
+    """Return a display value with float rounding noise stripped away.
+
+    Host coefficients arrive as a host-only composition that is already
+    normalized to the dopant basis (e.g. a basis-normalized ``0.97``), so a
+    clean base term can only be reconstructed to floating-point precision.
+    Values that are within ``1e-6`` of an integer (``1.0`` → ``1``, ``3.0000004``
+    → ``3``) or a two-decimal number (``0.561`` → ``0.56``) are collapsed so the
+    rendered base does not leak binary-representation noise (e.g. ``1.0000000002``).
+    """
+    value = float(value)
+    if abs(value) < 1e-6:
+        return 0.0
+    if abs(value - round(value)) < 1e-6:
+        return float(int(round(value)))
+    rounded2 = round(value, 2)
+    if abs(value - rounded2) < 1e-6:
+        return rounded2
+    rounded3 = round(value, 3)
+    if abs(value - rounded3) < 1e-6:
+        return rounded3
+    return value
+
+
 def _build_symbolic_formula_mathtext(
     host_formula: str,
     dopant_species: List[str],
@@ -366,12 +390,15 @@ def _build_symbolic_formula_mathtext(
     Build a matplotlib mathtext formula string with bold element symbols and
     subscript letters for the dopant fractions.
 
-    The host formula (e.g. ``'Na3PS4'``) is parsed into element → coefficient
-    pairs.  For each host element the full base coefficient is retained as the
-    leading term; each displacement is appended symbolically using the assigned
-    legend letter (e.g. ``Na_{3-2x-y}``).  Each dopant is rendered immediately
-    after the last host element it displaces, so a dopant sits next to the site
-    it substitutes (e.g. ``Na_{3-2x-y}Ca_{x}``).
+    The host formula (e.g. ``'Na2.75PS3.95'``) is the *doped* host-only
+    composition: the dopant species have already been stripped out and the
+    remaining host atoms are the displaced base.  For each host element the
+    base coefficient is therefore reconstructed by adding back the dopant
+    displacements it suffered (``base = doped + sum(c·letter)``) before the
+    symbolic ± terms are appended (e.g. ``Na_{2.75} → Na_{3-2x-y}``).  Each
+    dopant is rendered immediately after the last host element it displaces,
+    so a dopant sits next to the site it substitutes (e.g.
+    ``Na_{3-2x-y}Ca_{x}``).
 
     Element symbols use ``\\mathbf`` to match the bold title weight; the
     ``axes.titleweight`` rcParam does not propagate into mathtext.
@@ -419,18 +446,36 @@ def _build_symbolic_formula_mathtext(
         c = -c
         return f"+{c}{l}" if c != 1 else f"+{l}"
 
+    def _base_coeff(el: str, doped_count) -> float:
+        """Reconstruct the base (undoped) coefficient for a host element.
+
+        ``host_formula`` holds the *doped* host-only composition, where every
+        displaced host atom has already been removed.  The base is recovered by
+        adding back the atoms each dopant took (or added) at this element:
+        ``base = doped + Σ DOPANT_SUBSTITUTIONS[sp][el] · fraction(sp)``.  This
+        is the inverse of what ``_signed`` renders, so the ±terms start from
+        the true base LLTO composition rather than the doped one.
+        """
+        base = doped_count
+        for sp in dopant_species:
+            coeff = DOPANT_SUBSTITUTIONS.get(sp, {}).get(el)
+            if coeff is not None:
+                base += coeff * dopant_fractions.get(sp, 0.0)
+        return _clean_coeff(base)
+
     parts = []
     for i, (el, count) in enumerate(host_pairs):
         sub = displaced_by.get(el, [])
+        base = _base_coeff(el, count)
         if not sub:
             # Braces are required whenever the subscript is more than one
             # character (e.g. '0.31', '12'); a bare ``_`` binds only the next
             # single character, leaving the rest at baseline. Braces are a no-op
             # for single-digit integers, so this is safe to always apply.
-            sub_str = f"_{{{count}}}" if count != 1 else ""
+            sub_str = f"_{{{base:g}}}" if base != 1 else ""
             parts.append(f"\\mathbf{{{el}}}{sub_str}")
         else:
-            expr = str(count) + "".join(_signed(c, l) for l, c in sub)
+            expr = f"{base:g}" + "".join(_signed(c, l) for l, c in sub)
             parts.append(f"\\mathbf{{{el}}}_{{{expr}}}")
         for sp in placed.get(i, []):
             parts.append(f"\\mathbf{{{sp}}}_{{{dopant_letter[sp]}}}")

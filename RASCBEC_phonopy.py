@@ -58,10 +58,17 @@ Dopant roles (--bas / --dops)
 -----------------------------
 Explicit --bas / --dops values take precedence over automatic inference
 (dopants = species below 5 % of the supercell atoms, DOPANT_THRESHOLD).
-When --bas is given, it defines the host-formula coefficient of one AND the
+When --bas is given, it defines the host-formula normalization AND the
 denominator for the dopant x-values (x = n_dopant / n_bas), e.g.
 Li5La9Ti16O48 --bas Ti -> Li0.31La0.56TiO3. When omitted, the
 least-abundant host species is used as the legacy reference.
+
+--bas may also be a `+` joined group of species (e.g. --bas Ti+Ga). The
+group's member counts are summed into a single reference, so the group is
+normalized to one and may include dopant species. For doped LLTO this
+normalizes the formula so Ti + Ga = 1 (e.g. Li60La90Ti150O360 with
+--bas Ti+Ga -> Li0.38La0.56Ti0.94O2.25, and dopant x-values reported
+per 160 Ti+Ga sites).
 
 CSV metadata header (parsed by compare_raman.py & plot_raman.py):
 # Formula: Na3PS4
@@ -81,6 +88,7 @@ python RASCBEC_phonopy.py --phonon-yaml mesh.yaml
 python RASCBEC_phonopy.py --irreps irreps.yaml
 python RASCBEC_phonopy.py --no-plot
 python RASCBEC_phonopy.py --freq-min 50 --freq-max 600
+python RASCBEC_phonopy.py --bas Ti+Ga --dops Y Ga   # doped LLTO, Ti+Ga = 1
 python RASCBEC_phonopy.py --help
 """
 
@@ -153,10 +161,13 @@ def parse_args():
                    help='Phonopy irreps.yaml file with symmetry labels '
                         '(default: irreps.yaml)')
     p.add_argument('--bas', default=None,
-                   help='Explicit host basis species. It is normalized to '
+                   help='Explicit basis species (or + joined group) used as the '
+                        'concentration reference. It is normalized to '
                         'coefficient one in the host formula and defines the '
-                        'denominator for dopant x-values, e.g. Ti. If omitted, '
-                        'the least-abundant host species is used.')
+                        'denominator for dopant x-values (x = n_dop / n_bas). '
+                        'A group sums its member counts, e.g. --bas Ti or '
+                        '--bas Ti+Ga. If omitted, the least-abundant host '
+                        'species is used.')
     p.add_argument('--dops', nargs='+', default=None,
                    help='Explicit dopant species list, e.g. --dops Ca Cl. '
                         'Overrides automatic dopant inference '
@@ -694,43 +705,67 @@ def split_dops(species_names, species_n, threshold=DOPANT_THRESHOLD):
             host_n.append(int(count))
     return host_names, host_n, dop_names, dop_n
 
-def host_formula(host_names, host_n, basis_species=None):
+def host_formula(species_names, species_n, ref=None):
     """
     Build a compact host-composition label with a consistent normalization.
 
-    When ``basis_species`` is supplied, all host stoichiometric coefficients
-    are divided by that species' count, so its displayed coefficient is one.
-    The same count is used by :func:`build_chemistry_metadata` to report
-    dopant x-values. For example, ``Li5 La9 Ti16 O48`` with ``--bas Ti`` is
-    rendered as ``Li0.31La0.56TiO3``. If no basis is supplied, the legacy
-    behavior is retained: normalize to the least-abundant host species and
-    round to nearby integers.
+    All displayed coefficients are divided by the reference count ``ref`` so
+    that the reference is normalized to one. ``ref`` is the summed count of
+    the resolved basis group (see :func:`build_chemistry_metadata`), so a group
+    such as ``Ti+Ga`` normalizes to one even though the dopant member is not
+    itself shown in the host formula. For example, a host cell
+    ``Li60 La90 Ti150 O360`` with ``ref=150`` (basis Ti) renders as
+    ``Li0.4La0.6TiO2.4``, and the same cell with ``ref=160`` (basis Ti+Ga)
+    renders as ``Li0.38La0.56Ti0.94O2.25`` -- the sub-unity Ti coefficient
+    correctly reflects that part of the Ti site is occupied by Ga.
+
+    When ``ref`` is ``None`` the legacy behavior is retained: normalize to the
+    least-abundant shown species and round to nearby integers.
 
     This produces a readable analysis label rather than a general-purpose
     crystallographic formula reduction.
     """
-    if not host_names or not host_n:
-        raise ValueError("Host species could not be determined from the composition.")
-    count_map = {name: int(count) for name, count in zip(host_names, host_n)}
-    if basis_species is None:
-        ref = float(min(host_n))
-        coefficients = [float(max(1, round(count / ref))) for count in host_n]
+    if not species_names or not species_n:
+        raise ValueError("Composition species could not be determined.")
+    count_map = {name: int(count) for name, count in zip(species_names, species_n)}
+
+    if ref is None:
+        # Legacy: normalize to the least-abundant shown species and round.
+        base_ref = float(min(species_n))
+        coefficients = [float(max(1, round(count / base_ref))) for count in species_n]
     else:
-        if basis_species not in count_map:
-            raise ValueError(
-                f"Basis species '{basis_species}' is not a host species; "
-                "it cannot define the host formula.")
-        ref = float(count_map[basis_species])
-        coefficients = [count_map[name] / ref for name in host_names]
+        base_ref = max(float(ref), 1.0)
+        coefficients = [count_map[name] / base_ref for name in species_names]
 
     parts = []
-    for name, coefficient in zip(host_names, coefficients):
+    for name, coefficient in zip(species_names, coefficients):
         if np.isclose(coefficient, round(coefficient), atol=1e-8):
             integer = int(round(coefficient))
             parts.append(name if integer == 1 else f"{name}{integer}")
         else:
             parts.append(f"{name}{coefficient:.2f}".rstrip("0").rstrip("."))
     return "".join(parts)
+
+def split_basis(bas_species):
+    """
+    Split a ``--bas`` value into an ordered list of basis species.
+
+    A ``+`` joined group (e.g. ``Ti+Ga``) becomes ``['Ti', 'Ga']``; a bare
+    species (e.g. ``Ti``) becomes ``['Ti']``. Returns ``None`` when no basis
+    was supplied, so the caller can fall back to the legacy reference.
+
+    Parameters
+    ----------
+    bas_species : str or None -- raw CLI value (e.g. 'Ti' or 'Ti+Ga')
+
+    Returns
+    -------
+    list of str or None -- ordered basis species, or None when unspecified.
+    """
+    if bas_species is None:
+        return None
+    members = [sp.strip() for sp in bas_species.split('+')]
+    return members
 
 def validate_chemistry_roles(species_names, bas_species, dop_species):
     """
@@ -742,13 +777,17 @@ def validate_chemistry_roles(species_names, bas_species, dop_species):
     assignment is not automatic, before any downstream computation,
     filename, or plot silently uses a wrong or inconsistent assignment.
 
+    The basis (``--bas``) may be a single species or a ``+`` joined group
+    (e.g. ``Ti+Ga``). Every basis member -- host or dopant alike -- is
+    allowed, since a doped formula can legitimately be normalized to a
+    combined site population (e.g. ``Ti + Ga = 1``).
+
     Checks performed
     -----------------
-    - ``bas_species`` and every entry of ``dop_species`` must be a
-      non-empty string present in ``species_names`` (when provided).
-    - ``dop_species`` must not contain duplicate entries.
-    - ``bas_species`` cannot also appear in ``dop_species`` (the
-      concentration reference should be a host species, not a dopant).
+    - Every ``--bas`` member must be a non-empty species present in
+      ``species_names`` (when provided).
+    - ``--bas`` must not contain duplicate members.
+    - Every ``--dops`` entry must be a non-empty string with no duplicates.
 
     Raises
     ------
@@ -762,10 +801,18 @@ def validate_chemistry_roles(species_names, bas_species, dop_species):
     if bas_species is not None:
         if not bas_species.strip():
             raise ValueError("--bas cannot be an empty string.")
-        if bas_species not in species_set:
+        members = [sp.strip() for sp in bas_species.split('+')]
+        if any(not sp for sp in members):
             raise ValueError(
-                f"Basis species '{bas_species}' is not present in the structure "
+                "--bas contains an empty species (check for a stray '+').")
+        missing = sorted(sp for sp in set(members) if sp not in species_set)
+        if missing:
+            raise ValueError(
+                f"Basis species {missing} not present in the structure "
                 f"(available species: {sorted(species_set)}).")
+        duplicates = sorted({sp for sp in set(members) if members.count(sp) > 1})
+        if duplicates:
+            raise ValueError(f"--bas contains duplicate species: {duplicates}.")
 
     if dop_species:
         if any(not sp.strip() for sp in dop_species):
@@ -773,10 +820,6 @@ def validate_chemistry_roles(species_names, bas_species, dop_species):
         duplicates = sorted({sp for sp in dop_species if dop_species.count(sp) > 1})
         if duplicates:
             raise ValueError(f"--dops contains duplicate species: {sorted(duplicates)}.")
-
-    if bas_species is not None and bas_species in dop_species:
-        raise ValueError(
-            f"'{bas_species}' cannot be both the basis species & a dopant species.")
 
 def build_chemistry_metadata(species_names, species_n,
                              bas_species=None, dop_species=None):
@@ -802,7 +845,9 @@ def build_chemistry_metadata(species_names, species_n,
     species_n : ndarray
         Atom count per species.
     bas_species : str or None, optional
-        Species used as the concentration reference for dopant x-values.
+        Species (or ``+`` joined group) used as the concentration reference
+        for dopant x-values. A group's member counts are summed into a single
+        reference, e.g. ``Ti+Ga`` normalizes ``Ti + Ga`` to one.
     dop_species : list of str or None, optional
         Explicit dopant list. When provided, it fully overrides automatic
         dopant inference.
@@ -837,21 +882,37 @@ def build_chemistry_metadata(species_names, species_n,
         host_names, host_counts, dop_names, dop_counts = split_dops(
             species_names, species_n)
 
-    if bas_species is not None:
-        resolved_bas_species = bas_species
+    # --- Resolve the basis reference (count + label) ---
+    # ``--bas`` may be a single species or a ``+`` joined group (e.g. Ti+Ga).
+    # The reference count is the SUM of the group's member counts, so the
+    # group is normalized to one and may include dopant species (doped LLTO:
+    # normalize so Ti + Ga = 1). When omitted, fall back to the legacy
+    # least-abundant host species.
+    bas_members = split_basis(bas_species)
+    if bas_members is not None:
+        bas_count = sum(int(species_count_map.get(sp, 0)) for sp in bas_members)
+        bas_count = max(bas_count, 1)
+        resolved_bas_species = "+".join(bas_members)
     elif host_names:
         resolved_bas_species = host_names[int(np.argmin(host_counts))]
+        bas_count = max(int(species_count_map[resolved_bas_species]), 1)
     elif len(species_names):
         resolved_bas_species = species_names[int(np.argmin(species_n))]
+        bas_count = max(int(species_count_map[resolved_bas_species]), 1)
     else:
         resolved_bas_species = None
+        bas_count = 1
 
-    bas_count = (species_count_map[resolved_bas_species]
-                 if resolved_bas_species is not None else 1)
-    bas_count = max(int(bas_count), 1)
-
+    # --- Build the formula label ---
+    # The host-only formula is always normalized to the SAME basis used for
+    # the dopant x-values, so a single reference applies everywhere. For a group
+    # basis (e.g. Ti+Ga) that means every host coefficient is divided by
+    # (n_Ti + n_Ga); because some of the Ti-site population is Ga, the host Ti
+    # coefficient reads below one (e.g. 0.9), correctly reflecting "Ti+Ga = 1".
+    # The dopant species themselves stay out of the host formula and are shown
+    # via the dopant metadata / plot title instead.
     formula = (
-        host_formula(host_names, host_counts, basis_species=bas_species)
+        host_formula(host_names, host_counts, ref=bas_count)
         if host_names
         else "Unknown"
     )
@@ -868,7 +929,7 @@ def build_chemistry_metadata(species_names, species_n,
         dopants = (
             "Undoped"
             if not fractions or all(abs(x) < 1e-12 for x in fractions.values())
-            else " ".join(f"{name}={x:.3g}" for name, x in fractions.items())
+            else " ".join(f"{name}={x:.2f}" for name, x in fractions.items())
         )
         # Always include every declared dopant, including zeros.
         file_label = "-".join(
