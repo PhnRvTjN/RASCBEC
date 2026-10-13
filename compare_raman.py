@@ -52,8 +52,10 @@ Constraints and Layout:
 - --offset > 0 automatically applies --normalize-each if no norm flag is given.
 - Peak labels are shown ONLY in offset (waterfall) mode; default --n-labels 10.
 - If no input files are given, every *.csv in --dir (default: cwd) is used.
-- Trace labels are drawn on the left of each trace (no legend), mirroring
-  plot_raman_waterfall.py; colours use the hue-sorted tab10 / turbo logic.
+- In --offset (waterfall) mode, trace labels are drawn on the right of each
+  trace (no legend), mirroring plot_raman_waterfall.py; without --offset the
+  same labels go into a standard legend box in the upper-right corner instead.
+  Colours use the hue-sorted tab10 / turbo logic.
 
 Usage:
     # Waterfall with Stokes conversion (T=300 K, default), all *.csv in cwd
@@ -79,6 +81,7 @@ Usage:
 import argparse
 import colorsys
 import glob as _glob
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -89,7 +92,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgb
 from scipy.signal import find_peaks
 
-from plot_raman import build_raman_title
+from plot_raman import build_raman_title, formula_to_mathtext
 
 # ---------------------------------------------------------------------------
 # Defaults (aligned with plot_raman.py / plot_raman_waterfall.py)
@@ -380,12 +383,22 @@ def filename_fallback(filepath: Union[str, Path]) -> Tuple[str, str]:
 
 
 def chem_label(meta: Dict, filepath: Union[str, Path]) -> str:
-    """Chemical part of trace label: 'Formula [Dopants]' or fallback stem."""
+    """Chemical part of a trace label.
+
+    When the spectrum is undoped, returns the formula as a bold subscripted
+    mathtext string (e.g. ``$\\mathbf{Na}_{3}\\mathbf{P}\\mathbf{S}_{4}$``),
+    matching how the figure title renders it; if the formula is missing,
+    falls back to the filename tag. When a non-"Undoped" dopant string is
+    present, returns ``[Dopants]`` (the main label loop replaces this with the
+    subscript dopant-fraction legend).
+    """
     formula = meta.get('formula', '')
     dopants = meta.get('dopants', '')
-    tag, _ = filename_fallback(filepath)
-    base = formula or tag
-    return f"[{dopants}]" if dopants and dopants != "Undoped" else base
+    if dopants and dopants != "Undoped":
+        return f"[{dopants}]"
+    if formula:
+        return formula_to_mathtext(formula)
+    return filename_fallback(filepath)[0]
 
 
 def get_efield(meta: Dict, filepath: Union[str, Path]) -> str:
@@ -422,7 +435,12 @@ def dopant_fraction_label(meta: Dict) -> str:
 
 
 def build_legend_labels(all_meta: List[Dict], files: List[str]) -> Tuple[List[str], bool]:
-    """Build unique legend labels with automatic E-field disambiguation."""
+    """Build trace labels, appending the E-field when chemistry labels collide.
+
+    The E-field suffix is only added when two or more spectra share the same
+    chemistry label; it does not guarantee the final labels are unique (if the
+    E-fields also coincide, the labels remain identical).
+    """
     chem_labels = [chem_label(m, f) for m, f in zip(all_meta, files)]
     efields = [get_efield(m, f) for m, f in zip(all_meta, files)]
     efield_in_legend = len(set(chem_labels)) < len(chem_labels)
@@ -491,7 +509,8 @@ def parse_args():
     p.add_argument('--raw-activity', action='store_true',
                    help='Plot raw Raman activities S(nu) without 1/nu or thermal Bose factors')
     p.add_argument('--title', type=str, default=None,
-                   help='Custom figure title (default: auto-generated)')
+                   help='Custom figure title (default: auto-generated; '
+                        'pass an empty string --title "" to omit the title)')
     p.add_argument('--out', default=None,
                    help='Output PNG filename (default: compare_<formula>_<mode>_<norm>.png)')
     return p.parse_args()
@@ -563,12 +582,12 @@ def main():
     # Normalisation
     if args.normalize_each:
         spectra = [s / s.max() if s.max() > 0 else s for s in spectra]
-        y_label = 'Intensity (normalised per spectrum)' if not args.raw_activity else 'Activity (normalised per spectrum)'
+        y_label = 'Intensity (normalized per spectrum)' if not args.raw_activity else 'Activity (normalized per spectrum)'
         norm_mode = 'enorm'
     elif args.normalize:
         gmax = max(s.max() for s in spectra)
         spectra = [s / gmax if gmax > 0 else s for s in spectra]
-        y_label = 'Intensity (normalised to global max)' if not args.raw_activity else 'Activity (normalised to global max)'
+        y_label = 'Intensity (normalized to global max)' if not args.raw_activity else 'Activity (normalized to global max)'
         norm_mode = 'gnorm'
     else:
         y_label = 'Stokes Intensity (arb. units, absolute)' if not args.raw_activity else 'Raman Activity S(ν) (absolute)'
@@ -582,20 +601,33 @@ def main():
 
     trace_labels = []
     for idx, (meta, lbl) in enumerate(zip(all_meta, auto_labels)):
-        fl = meta.get('formula', '') or meta.get('file_label', '')
-        if not fl:
-            fl = lbl
+        # An explicit --labels entry takes precedence over the auto-generated
+        # chemistry/E-field label so users can disambiguate identical spectra.
+        user_lbl = args.labels[idx] if args.labels and idx < len(args.labels) else None
+        if user_lbl:
+            trace_labels.append(user_lbl)
+            continue
+        # lbl already carries the subscripted mathtext formula for undoped
+        # spectra (via chem_label) and "[Dopants]" for doped ones.
+        fl = lbl if lbl else (meta.get('formula', '') or meta.get('file_label', ''))
         if efield_in_legend:
             e = meta.get('e_field', '') or filename_fallback(files[idx])[1]
-            if e:
+            if e and f" | E={e} eV/Å" not in fl:
                 fl = f"{fl} | E={e} eV/Å"
         dop_legend = dopant_fraction_label(meta)
         if dop_legend:
             fl = f"{dop_legend}"
         trace_labels.append(fl)
 
+    if len(trace_labels) > 1 and len(set(trace_labels)) == 1:
+        print("  (warning: all spectra share the identical trace label "
+              f"'{trace_labels[0]}' -- the legend cannot distinguish them. "
+              "Pass distinct --labels to disambiguate.)")
+
     # Figure title
-    if args.title:
+    if args.title == "":
+        plot_title = None
+    elif args.title is not None:
         plot_title = args.title
     else:
         formulae = [m.get('formula', '') for m in all_meta]
@@ -605,7 +637,22 @@ def main():
 
         if len(unique_f) == 1:
             formula = list(unique_f)[0]
-            dopants = all_meta[0].get('dopants', '')
+            # A dopant matrix shares one base host formula but varies the
+            # dopant set per file (e.g. an undoped parent plus several doped
+            # compositions). Read only file[0]'s dopants would drop the species
+            # carried by the other files, so union the species across all files
+            # (first-seen order) to recover the full symbolic formula
+            # (e.g. Na_{3-2x-y}Ca_xPS_{4-y}Cl_y). The placeholder values are
+            # unused: the title builder renders only the species, and the
+            # per-file fraction legend is turned off.
+            dopant_species = []
+            for m in all_meta:
+                for entry in re.split(r'\s+', (m.get('dopants') or '').strip()):
+                    if '=' in entry:
+                        sp = entry.split('=', 1)[0]
+                        if sp not in dopant_species:
+                            dopant_species.append(sp)
+            dopants = " ".join(f"{sp}=0" for sp in dopant_species)
             E_val = float(list(unique_ef)[0]) if len(unique_ef) == 1 else None
             plot_title = build_raman_title(
                 chem={"formula": formula, "dopants": dopants},
@@ -629,7 +676,7 @@ def main():
 
     set_style()
     n = len(files)
-    fig_h = max(6, n * 1) if waterfall_mode else 6
+    fig_h = max(6, n * 1) if waterfall_mode else 4
     fig, ax = plt.subplots(figsize=(6, fig_h))
 
     colors = pick_colors(n)
@@ -640,19 +687,25 @@ def main():
         baseline = i * args.offset
         has_irreps = any(lbl != '' for lbl in irreps)
 
-        ax.plot(x, spectrum + baseline, lw=1.6, color=color, zorder=4)
+        # In non-waterfall mode the trace label goes into the legend box; in
+        # waterfall mode it is drawn inline to the right of each trace.
+        ax.plot(x, spectrum + baseline, lw=1.6, color=color, zorder=4,
+                label=label if not waterfall_mode else None)
 
-        label_dy = float(spectrum.max()) * 0.2 if spectrum.max() > 0 else 0.0
-        ax.text(
-            0.98*freq_max,
-            baseline + label_dy,
-            f"{label}",
-            color=color,
-            fontsize=8,
-            fontweight="bold",
-            va="bottom",
-            ha="right",
-            zorder=5)
+        if waterfall_mode:
+            label_dy = float(spectrum.max()) * 0.6 if spectrum.max() > 0 else 0.0
+            ax.text(
+                0.99*freq_max,
+                baseline + label_dy,
+                f"{label}",
+                color=color,
+                fontsize=8,
+                fontweight="bold",
+                va="bottom",
+                ha="right",
+                zorder=5,
+                bbox=dict(facecolor="#cccccc", edgecolor="#cccccc", alpha=0.5, pad=1.0),
+            )
 
         if args.sticks and freqs.size:
             stick_scale = 0.6 / weights.max() if weights.max() > 0 else 1.0
@@ -681,6 +734,9 @@ def main():
                     xytext=(0, 6), textcoords='offset points',
                     ha='center', va='bottom',
                     fontsize=8, color=color, linespacing=1.0)
+
+    if not waterfall_mode and n > 1:
+        ax.legend(loc="upper right", fontsize=8, framealpha=0.6)
 
     ax.set_xlim(freq_min, freq_max)
     ax.set_ylim(bottom=0)

@@ -443,6 +443,40 @@ def _build_symbolic_formula_mathtext(
     return "".join(parts)
 
 
+def formula_to_mathtext(formula: str, dopants: str = "") -> str:
+    """Render a single composition as a bold subscripted matplotlib mathtext string.
+
+    Wraps the same builder used by :func:`build_raman_title` so that trace
+    labels, legend entries, and the figure title all agree on how a formula
+    is written (e.g. ``'Na3PS4'`` → ``$\\mathbf{Na}_{3}\\mathbf{P}\\mathbf{S}_{4}$``;
+    ``'Na3PS4'`` with ``'Ca=0.125 Cl=0.0625'`` → the symbolic
+    ``Na_{3-2x-y}Ca_{x}PS_{4-y}Cl_{y}``).
+
+    Parameters
+    ----------
+    formula : str
+        Base host formula, e.g. ``'Na3PS3.5O0.5'``.
+    dopants : str, optional
+        Dopant descriptor ``"Sp=val Sp=val ..."`` or ``""``/``"Undoped"``.
+
+    Returns
+    -------
+    str
+        A ``$...$``-delimited mathtext string. Empty string if ``formula`` is empty.
+    """
+    if not formula:
+        return ""
+    pairs = []
+    for entry in re.split(r'\s+', (dopants or "").strip()):
+        if '=' in entry:
+            sp, val = entry.split('=', 1)
+            try:
+                pairs.append((sp, float(val)))
+            except ValueError:
+                pass
+    return f"${_build_symbolic_formula_mathtext(formula, [sp for sp, _ in pairs], {sp: v for sp, v in pairs})}$"
+
+
 def build_raman_title(
     chem: dict,
     E: Optional[float],
