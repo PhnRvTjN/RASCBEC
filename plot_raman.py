@@ -49,7 +49,7 @@ Key Physical Relevance (e.g., LLTO vs. Na3PS4):
    Raman activity :math:`S(\\nu)` can still be plotted using ``--raw-activity``.
 
 Usage:
-    python plot_raman.py                          # auto-uses the only CSV in cwd (T=300K, 632.8nm)
+    python plot_raman.py                          # auto-uses the only CSV in cwd (T=350K, 632.8nm)
     python plot_raman.py --dat LLTO_E0.02.csv
     python plot_raman.py --dat LLTO_E0.02.csv --temperature 280 --laser-wl 532
     python plot_raman.py --dat LLTO_E0.02.csv --raw-activity     # legacy S(nu) mode
@@ -60,6 +60,7 @@ Usage:
 """
 
 import argparse
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -78,7 +79,7 @@ STICK_A = 0.6                 # stick alpha (pre-broadened stick intensity)
 STICK_LW = 0.8                # stick linewidth
 THZCM1 = 33.356409519815204   # 1 THz in cm^-1 (c = 2.99792458e10 cm/s)
 KB_CM1 = 0.69503476           # Boltzmann constant kB in cm^-1 / K
-DEFAULT_TEMP = 300.0          # Default sample temperature in Kelvin
+DEFAULT_TEMP = 350.0          # Default sample temperature in Kelvin
 DEFAULT_LASER_WL = 632.8      # Default excitation laser wavelength in nm
 
 
@@ -325,6 +326,174 @@ def _read_csv_metadata(dat_file: Union[str, Path]) -> Dict[str, Optional[Union[s
     return meta
 
 
+# ---------------------------------------------------------------------------
+# Raman plot title builder (shared by RASCBEC_phonopy.py & standalone plotting)
+# ---------------------------------------------------------------------------
+
+# Substitution rules (per formula unit) for dopant species.
+# Keys: dopant species. Values: dict of {displaced host species → coefficient}.
+# A positive coefficient means the dopant displaces that many host atoms
+# (e.g. Ca → 2× Na).  A negative coefficient means the dopant adds to the
+# host count (rare; e.g. Ga → +1 Li).
+DOPANT_SUBSTITUTIONS = {
+    'Ca': {'Na': 2},
+    'Cl': {'Na': 1, 'S': 1},
+    'Ga': {'Ti': 1, 'Li': -1},
+    'Y':  {'La': 1},
+}
+
+
+def _build_symbolic_formula_mathtext(
+    host_formula: str,
+    dopant_species: List[str],
+    dopant_fractions: Dict[str, float],
+) -> str:
+    """
+    Build a matplotlib mathtext formula string with bold element symbols and
+    subscript letters for the dopant fractions.
+
+    The host formula (e.g. ``'Na3PS4'``) is parsed into element → coefficient
+    pairs.  For each host element the full base coefficient is retained as the
+    leading term; each displacement is appended symbolically using the assigned
+    legend letter (e.g. ``Na_{3-2x-y}``).  Each dopant is rendered immediately
+    after the last host element it displaces, so a dopant sits next to the site
+    it substitutes (e.g. ``Na_{3-2x-y}Ca_{x}``).
+
+    Element symbols use ``\\mathbf`` to match the bold title weight; the
+    ``axes.titleweight`` rcParam does not propagate into mathtext.
+
+    Parameters
+    ----------
+    host_formula     : str  -- e.g. 'Na3PS4'
+    dopant_species   : list of str -- e.g. ['Ca', 'Cl']
+    dopant_fractions : dict of str → float -- e.g. {'Ca': 0.125, 'Cl': 0.0625}
+
+    Returns
+    -------
+    str
+        e.g. ``\\mathbf{Na}_{3-2x-y}\\mathbf{Ca}_{x}\\mathbf{P}\\mathbf{S}_{4-y}\\mathbf{Cl}_{y}``
+    """
+    host_pairs = re.findall(r'([A-Z][a-z]?)(\d*)', host_formula)
+    host_pairs = [(el, int(co) if co else 1) for el, co in host_pairs]
+
+    letters = "xyzwuv"
+    dopant_letter = {sp: letters[i] for i, sp in enumerate(dopant_species)}
+
+    # For each host element, collect which dopants displace it and by what coeff.
+    displaced_by = {}  # host_el → list of (letter, coefficient)
+    for sp in dopant_species:
+        rules = DOPANT_SUBSTITUTIONS.get(sp, {})
+        letter = dopant_letter[sp]
+        for host_el, coeff in rules.items():
+            displaced_by.setdefault(host_el, []).append((letter, coeff))
+
+    # Each dopant is rendered after the LAST host element (in host order) it displaces.
+    host_index = {el: i for i, (el, _) in enumerate(host_pairs)}
+    placed = {}        # host index → list of dopant species
+    trailing = []      # dopants that displace no known host element
+    for sp in dopant_species:
+        hosts = [h for h in DOPANT_SUBSTITUTIONS.get(sp, {}) if h in host_index]
+        if not hosts:
+            trailing.append(sp)
+        else:
+            placed.setdefault(max(host_index[h] for h in hosts), []).append(sp)
+
+    def _signed(c: int, l: str) -> str:
+        """Build a ±c·l term; omit coefficient 1; handle negative (addition)."""
+        if c > 0:
+            return f"-{c}{l}" if c != 1 else f"-{l}"
+        c = -c
+        return f"+{c}{l}" if c != 1 else f"+{l}"
+
+    parts = []
+    for i, (el, count) in enumerate(host_pairs):
+        sub = displaced_by.get(el, [])
+        if not sub:
+            sub_str = f"_{count}" if count != 1 else ""
+            parts.append(f"\\mathbf{{{el}}}{sub_str}")
+        else:
+            expr = str(count) + "".join(_signed(c, l) for l, c in sub)
+            parts.append(f"\\mathbf{{{el}}}_{{{expr}}}")
+        for sp in placed.get(i, []):
+            parts.append(f"\\mathbf{{{sp}}}_{{{dopant_letter[sp]}}}")
+
+    parts.extend(f"\\mathbf{{{sp}}}_{{{dopant_letter[sp]}}}" for sp in trailing)
+
+    return "".join(parts)
+
+
+def build_raman_title(
+    chem: dict,
+    E: Optional[float],
+    gamma: float,
+    temperature: float,
+    raw_activity: bool = False,
+) -> str:
+    """
+    Build a two-line Raman plot title.
+
+    Line 1: bold doped formula (mathtext) + Raman + dopant-fraction legend
+            (e.g. ``Na₃₋₂ₓ₋ᵧCaₓPS₄₋ᵧClᵧ Raman | x=0.125  y=0.0625``).
+    Line 2: run parameters — E, FWHM, T (or S(ν) when ``raw_activity=True``).
+
+    Parameters
+    ----------
+    chem         : dict
+        Metadata with keys ``'formula'`` (str) and ``'dopants'`` (str, e.g.
+        ``"Ca=0.125 Cl=0.0625"`` or ``"Undoped"``).
+    E            : float or None
+        E-field magnitude in eV/Å.  Omitted from title when None.
+    gamma        : float
+        Lorentzian FWHM in cm^-1.
+    temperature  : float
+        Sample temperature in K.
+    raw_activity : bool, optional
+        If True, show ``S(ν)`` instead of temperature in line 2.
+
+    Returns
+    -------
+    str
+        Two-line title string ready for matplotlib ``set_title``.
+    """
+    letters = "xyzwuv"
+
+    # Parse dopant species and fractions from "Sp=val Sp=val ..." string.
+    dopant_pairs = []
+    for entry in re.split(r'\s+', (chem.get("dopants") or "").strip()):
+        if '=' in entry:
+            sp, val = entry.split('=', 1)
+            try:
+                dopant_pairs.append((sp, float(val)))
+            except ValueError:
+                pass
+
+    # Line 1: formula + legend
+    if dopant_pairs:
+        dop_species   = [sp for sp, _ in dopant_pairs]
+        dop_fractions = {sp: val for sp, val in dopant_pairs}
+        formula_str = _build_symbolic_formula_mathtext(
+            chem['formula'], dop_species, dop_fractions)
+        legend = " ".join(
+            f"{letters[i]}={dop_fractions[sp]:g}"
+            for i, sp in enumerate(dop_species))
+        line1 = f"${formula_str}$ Raman | {legend}"
+    else:
+        line1 = f"{chem.get('formula', '')}  Raman"
+
+    # Line 2: parameters
+    line2_parts = []
+    if E is not None:
+        line2_parts.append(f"E = {E:g} eV/Å")
+    line2_parts.append(f"FWHM = {gamma:.2f} cm$^{{-1}}$")
+    if raw_activity:
+        line2_parts.append("S(ν)")
+    else:
+        line2_parts.append(f"T = {temperature:g} K")
+    line2 = "  |  ".join(line2_parts)
+
+    return f"{line1}\n{line2}"
+
+
 def _build_plot_title_from_csv(
     dat_file: Union[str, Path],
     gamma: float,
@@ -333,6 +502,7 @@ def _build_plot_title_from_csv(
 ) -> str:
     """
     Rebuild the informative plot title from CSV metadata and physical parameters.
+    (Backward-compatible wrapper around :func:`build_raman_title`.)
 
     Parameters
     ----------
@@ -351,24 +521,17 @@ def _build_plot_title_from_csv(
         Formatted plot title string.
     """
     meta = _read_csv_metadata(dat_file)
-
     formula = meta['formula']
-    dopants = meta['dopants']
-    E = meta['E_field']
-
     if not formula:
         return Path(dat_file).stem
 
-    chem_part = (
-        f"{formula} | {dopants}"
-        if dopants and dopants != "Undoped"
-        else formula
+    return build_raman_title(
+        chem={"formula": formula, "dopants": meta['dopants']},
+        E=meta['E_field'],
+        gamma=gamma,
+        temperature=temperature,
+        raw_activity=raw_activity,
     )
-
-    t_part = f" | T = {temperature:g} K" if not raw_activity else " | S(ν)"
-    if E is not None:
-        return f"{chem_part}\nE = {E:g} eV/Å | FWHM = {gamma:.2f} cm$^{{-1}}${t_part}"
-    return f"{chem_part} | FWHM = {gamma:.2f} cm$^{{-1}}${t_part}"
 
 
 def plot_raman_spectrum(
@@ -415,7 +578,7 @@ def plot_raman_spectrum(
     raw_activity : bool, optional
         If True, plot raw Raman activity S(nu) instead of Stokes intensity I(nu, T).
     temperature : float, optional
-        Sample temperature in Kelvin for Bose-Einstein factor (default: 300.0 K).
+        Sample temperature in Kelvin for Bose-Einstein factor (default: 350.0 K).
     laser_wl : float, optional
         Laser excitation wavelength in nm for (nu_L - nu)^4 factor (default: 532.0 nm).
     """
@@ -563,9 +726,9 @@ if __name__ == '__main__':
     p.add_argument('--freq-max', type=float, default=None,
                    help='Upper x-axis limit in cm-1 (default: auto)')
     p.add_argument('--temperature', type=float, default=DEFAULT_TEMP,
-                   help='Sample temperature in K for Bose-Einstein factor (default: 300.0 K)')
+                   help='Sample temperature in K for Bose-Einstein factor (default: 350.0 K)')
     p.add_argument('--laser-wl', type=float, default=DEFAULT_LASER_WL,
-                   help='Excitation laser wavelength in nm (default: 532.0 nm)')
+                   help='Excitation laser wavelength in nm (default: 632.8 nm)')
     p.add_argument('--raw-activity', action='store_true',
                    help='Plot raw Raman activity S(nu) without 1/nu or thermal Bose factors')
     p.add_argument('--no-sticks', action='store_true',

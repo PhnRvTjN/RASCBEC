@@ -626,12 +626,12 @@ def main():
             top_peaks = sorted(peaks, key=lambda p: -spectrum[p])[:args.n_labels]
             for pk in top_peaks:
                 peak_freq = x[pk]
-                if has_irreps and len(freqs) > 0:
-                    closest_idx = int(np.argmin(np.abs(freqs - peak_freq)))
-                    irrep = irreps[closest_idx]
-                    label_text = f"{irrep}\n{peak_freq:.0f}"
-                else:
-                    label_text = f"{peak_freq:.0f}"
+                # if has_irreps and len(freqs) > 0:
+                #     closest_idx = int(np.argmin(np.abs(freqs - peak_freq)))
+                #     irrep = irreps[closest_idx]
+                #     label_text = f"{irrep}\n{peak_freq:.0f}"
+                # else:
+                label_text = f"{peak_freq:.0f}"
                 ax.annotate(
                     label_text,
                     xy=(peak_freq, spectrum[pk] + baseline),

@@ -92,7 +92,12 @@ import yaml
 from pathlib import Path
 from pymatgen.core import Element
 
-from plot_raman import plot_raman_spectrum
+from plot_raman import (
+    plot_raman_spectrum,
+    build_raman_title,
+    DEFAULT_TEMP,
+    DEFAULT_LASER_WL,
+)
 
 # ---------------------------------------------------------------------------
 # Physical constants
@@ -133,6 +138,10 @@ def parse_args():
     p.add_argument('--gamma', type=float, default=0.25,
                    help='Lorentzian FWHM in THz for spectral broadening (default: 0.25);'
                         'converted to cm-1 internally via THZCM1.')
+    p.add_argument('--temperature', type=float, default=DEFAULT_TEMP,
+                   help='Sample temperature in K for Bose-Einstein factor (default: 300.0 K)')
+    p.add_argument('--laser-wl', type=float, default=DEFAULT_LASER_WL,
+                   help='Excitation laser wavelength in nm (default: 632.8 nm)')
     p.add_argument('--freq-min', type=float, default=0.0,
                    help='Lower x-axis limit of plot in cm-1 (default: 0)')
     p.add_argument('--freq-max', type=float, default=None,
@@ -879,31 +888,6 @@ def build_chemistry_metadata(species_names, species_n,
         "bas_species": resolved_bas_species,
     }
 
-def build_plot_title(chem, E, gamma):
-    """
-    Build an informative plot title from chemistry metadata and run parameters.
-
-    The chemistry fragment uses the phonon_mode_pred convention:
-    ``<formula> | <dopants>`` when doped, else ``<formula>``.
-
-    Parameters
-    ----------
-    chem    : dict  -- output of :func:`build_chemistry_metadata`
-    E       : float -- electric field magnitude (eV/Å)
-    gamma   : float -- Lorentzian FWHM (cm-1)
-
-    Returns
-    -------
-    title : str
-    """
-    dopants = chem.get("dopants") or ""
-    chem_part = (
-        f"{chem['formula']} | {dopants}"
-        if dopants and dopants != "Undoped"
-        else chem["formula"]
-    )
-    return f"{chem_part}\nE = {E} eV/Å | FWHM = {gamma:.4f} cm$^{{-1}}$"
-
 def raman_filename(chem, E):
     """
     Build the chemistry-based Raman output stem (no extension).
@@ -989,16 +973,18 @@ def main():
 
     # --- 9. Plot ---
     if not args.no_plot:
-        title = build_plot_title(chem, E, args.gamma * THZCM1)
+        title = build_raman_title(chem, E, args.gamma * THZCM1, args.temperature)
         plot_raman_spectrum(
-            dat_file = out_csv,
-            out_png  = out_png,
-            gamma    = args.gamma * THZCM1,
-            freq_min = args.freq_min,
-            freq_max = args.freq_max,
-            sticks   = not args.no_sticks,
-            n_labels = args.n_labels,
-            title    = title,
+            dat_file    = out_csv,
+            out_png     = out_png,
+            gamma       = args.gamma * THZCM1,
+            freq_min    = args.freq_min,
+            freq_max    = args.freq_max,
+            sticks      = not args.no_sticks,
+            n_labels    = args.n_labels,
+            title       = title,
+            temperature = args.temperature,
+            laser_wl    = args.laser_wl,
         )
         print(f"Written : {out_png}")
 
