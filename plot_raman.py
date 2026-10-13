@@ -343,6 +343,20 @@ DOPANT_SUBSTITUTIONS = {
 }
 
 
+def _parse_coefficient(token: str):
+    """Convert a formula coefficient token to ``int`` (preferred) or ``float``.
+
+    An empty token means the element has no explicit coefficient (→ 1).
+    Integer-valued strings stay ``int`` so rendering is unchanged
+    (``'3'`` → ``3``, not ``3.0``); fractional values (e.g. ``'0.31'`` from a
+    basis-normalized host formula) become ``float``.
+    """
+    if not token:
+        return 1
+    value = float(token)
+    return int(value) if value.is_integer() else value
+
+
 def _build_symbolic_formula_mathtext(
     host_formula: str,
     dopant_species: List[str],
@@ -373,8 +387,8 @@ def _build_symbolic_formula_mathtext(
     str
         e.g. ``\\mathbf{Na}_{3-2x-y}\\mathbf{Ca}_{x}\\mathbf{P}\\mathbf{S}_{4-y}\\mathbf{Cl}_{y}``
     """
-    host_pairs = re.findall(r'([A-Z][a-z]?)(\d*)', host_formula)
-    host_pairs = [(el, int(co) if co else 1) for el, co in host_pairs]
+    host_pairs = re.findall(r'([A-Z][a-z]?)(\d*\.?\d*)', host_formula)
+    host_pairs = [(el, _parse_coefficient(co)) for el, co in host_pairs]
 
     letters = "xyzwuv"
     dopant_letter = {sp: letters[i] for i, sp in enumerate(dopant_species)}
@@ -409,7 +423,11 @@ def _build_symbolic_formula_mathtext(
     for i, (el, count) in enumerate(host_pairs):
         sub = displaced_by.get(el, [])
         if not sub:
-            sub_str = f"_{count}" if count != 1 else ""
+            # Braces are required whenever the subscript is more than one
+            # character (e.g. '0.31', '12'); a bare ``_`` binds only the next
+            # single character, leaving the rest at baseline. Braces are a no-op
+            # for single-digit integers, so this is safe to always apply.
+            sub_str = f"_{{{count}}}" if count != 1 else ""
             parts.append(f"\\mathbf{{{el}}}{sub_str}")
         else:
             expr = str(count) + "".join(_signed(c, l) for l, c in sub)
@@ -478,7 +496,15 @@ def build_raman_title(
             for i, sp in enumerate(dop_species))
         line1 = f"${formula_str}$ Raman | {legend}"
     else:
-        line1 = f"{chem.get('formula', '')}  Raman"
+        # Undoped: still render the host formula as subscripted mathtext
+        # (e.g. Li3LaTiO3 -> Li_{3}LaTiO_{3}); previously fell back to
+        # plain text and dropped the subscripts.
+        formula = chem.get('formula') or ''
+        if formula:
+            line1 = (f"${_build_symbolic_formula_mathtext(formula, [], {})}$"
+                     "  Raman")
+        else:
+            line1 = "  Raman"
 
     # Line 2: parameters
     line2_parts = []
