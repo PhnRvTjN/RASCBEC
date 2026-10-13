@@ -89,6 +89,8 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgb
 from scipy.signal import find_peaks
 
+from plot_raman import build_raman_title
+
 # ---------------------------------------------------------------------------
 # Defaults (aligned with plot_raman.py / plot_raman_waterfall.py)
 # ---------------------------------------------------------------------------
@@ -109,21 +111,21 @@ def set_style() -> None:
     plt.rcParams.update({
         "figure.dpi": 200,
         "savefig.dpi": 600,
-        "font.size": 12,
+        "font.size": 10,
         "axes.titlesize": 12,
-        "axes.labelsize": 12,
+        "axes.labelsize": 10,
         "axes.titleweight": "bold",
         "axes.labelweight": "bold",
         "axes.linewidth": 1.0,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
+        "xtick.labelsize": 8,
+        "ytick.labelsize": 8,
         "xtick.direction": "in",
         "ytick.direction": "in",
         "xtick.major.size": 4,
         "ytick.major.size": 4,
         "xtick.minor.size": 2,
         "ytick.minor.size": 2,
-        "legend.fontsize": 10,
+        "legend.fontsize": 8,
         "legend.frameon": True,
         "legend.framealpha": 0.6,
         "legend.facecolor": "#cccccc",
@@ -383,12 +385,40 @@ def chem_label(meta: Dict, filepath: Union[str, Path]) -> str:
     dopants = meta.get('dopants', '')
     tag, _ = filename_fallback(filepath)
     base = formula or tag
-    return f"{base} [{dopants}]" if dopants and dopants != "Undoped" else base
+    return f"[{dopants}]" if dopants and dopants != "Undoped" else base
 
 
 def get_efield(meta: Dict, filepath: Union[str, Path]) -> str:
     """Return E-field string from metadata or filename fallback."""
     return meta.get('e_field', '') or filename_fallback(filepath)[1]
+
+
+# Subscript letters for dopant fractions, shared with the title builder so a
+# trace label and the formula title agree on which letter is which dopant.
+DOPANT_LETTERS = "xyzwuv"
+
+
+def dopant_fraction_label(meta: Dict) -> str:
+    """Mathtext dopant-fraction legend for a trace label.
+
+    Parses the ``"Sp=val Sp=val ..."``, ``dopants`` metadata and renders
+    ``$x_{Ca}=0.125$, $y_{Cl}=0.0625$`` (the letter is subscripted on the
+    dopant element, then its value). Returns ``''`` when there are no dopants.
+    """
+    letters = DOPANT_LETTERS
+    pairs = []
+    for entry in (meta.get('dopants', '') or '').split():
+        if '=' not in entry:
+            continue
+        sp, val = entry.split('=', 1)
+        try:
+            pairs.append((sp, float(val)))
+        except ValueError:
+            continue
+    if not pairs:
+        return ''
+    return "\n".join(
+        f"$\\mathbf{{{letters[i]}}}_{{{sp}}}={val:.2f}$" for i, (sp, val) in enumerate(pairs))
 
 
 def build_legend_labels(all_meta: List[Dict], files: List[str]) -> Tuple[List[str], bool]:
@@ -552,15 +582,16 @@ def main():
 
     trace_labels = []
     for idx, (meta, lbl) in enumerate(zip(all_meta, auto_labels)):
-        fl = meta.get('file_label', '')
-        if fl == 'Undoped':
-            fl = meta.get('formula', '')
+        fl = meta.get('formula', '') or meta.get('file_label', '')
         if not fl:
             fl = lbl
         if efield_in_legend:
             e = meta.get('e_field', '') or filename_fallback(files[idx])[1]
             if e:
                 fl = f"{fl} | E={e} eV/Å"
+        dop_legend = dopant_fraction_label(meta)
+        if dop_legend:
+            fl = f"{dop_legend}"
         trace_labels.append(fl)
 
     # Figure title
@@ -569,20 +600,32 @@ def main():
     else:
         formulae = [m.get('formula', '') for m in all_meta]
         unique_f = set(f for f in formulae if f)
-        title_line1 = (f"{list(unique_f)[0]} Raman Comparison"
-                       if len(unique_f) == 1 else "Raman Spectra Comparison")
-        title_line2_parts = []
-        if not efield_in_legend:
-            efields = [get_efield(m, f) for m, f in zip(all_meta, files)]
-            unique_ef = set(e for e in efields if e)
+        efields = [get_efield(m, f) for m, f in zip(all_meta, files)]
+        unique_ef = set(e for e in efields if e)
+
+        if len(unique_f) == 1:
+            formula = list(unique_f)[0]
+            dopants = all_meta[0].get('dopants', '')
+            E_val = float(list(unique_ef)[0]) if len(unique_ef) == 1 else None
+            plot_title = build_raman_title(
+                chem={"formula": formula, "dopants": dopants},
+                E=E_val,
+                gamma=gamma,
+                temperature=args.temperature,
+                raw_activity=args.raw_activity,
+                suffix="Raman Comparison",
+                show_legend=False,
+            )
+        else:
+            title_line2_parts = []
             if len(unique_ef) == 1:
                 title_line2_parts.append(f"E = {list(unique_ef)[0]} eV/Å")
-        title_line2_parts.append(f"FWHM = {gamma:.2f} cm$^{{-1}}$")
-        if not args.raw_activity:
-            title_line2_parts.append(f"T = {args.temperature:g} K")
-        else:
-            title_line2_parts.append("S(ν)")
-        plot_title = f"{title_line1}\n" + " | ".join(title_line2_parts)
+            title_line2_parts.append(f"FWHM = {gamma:.2f} cm$^{{-1}}$")
+            if not args.raw_activity:
+                title_line2_parts.append(f"T = {args.temperature:g} K")
+            else:
+                title_line2_parts.append("S(ν)")
+            plot_title = "Raman Spectra Comparison\n" + " | ".join(title_line2_parts)
 
     set_style()
     n = len(files)
@@ -601,11 +644,11 @@ def main():
 
         label_dy = float(spectrum.max()) * 0.2 if spectrum.max() > 0 else 0.0
         ax.text(
-            freq_max,
+            0.98*freq_max,
             baseline + label_dy,
-            f"  {label}",
+            f"{label}",
             color=color,
-            fontsize=10,
+            fontsize=8,
             fontweight="bold",
             va="bottom",
             ha="right",
@@ -637,7 +680,7 @@ def main():
                     xy=(peak_freq, spectrum[pk] + baseline),
                     xytext=(0, 6), textcoords='offset points',
                     ha='center', va='bottom',
-                    fontsize=6, color=color, linespacing=1.0)
+                    fontsize=8, color=color, linespacing=1.0)
 
     ax.set_xlim(freq_min, freq_max)
     ax.set_ylim(bottom=0)

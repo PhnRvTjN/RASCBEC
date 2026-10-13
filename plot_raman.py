@@ -357,30 +357,6 @@ def _parse_coefficient(token: str):
     return int(value) if value.is_integer() else value
 
 
-def _clean_coeff(value) -> float:
-    """Return a display value with float rounding noise stripped away.
-
-    Host coefficients arrive as a host-only composition that is already
-    normalized to the dopant basis (e.g. a basis-normalized ``0.97``), so a
-    clean base term can only be reconstructed to floating-point precision.
-    Values that are within ``1e-6`` of an integer (``1.0`` → ``1``, ``3.0000004``
-    → ``3``) or a two-decimal number (``0.561`` → ``0.56``) are collapsed so the
-    rendered base does not leak binary-representation noise (e.g. ``1.0000000002``).
-    """
-    value = float(value)
-    if abs(value) < 1e-6:
-        return 0.0
-    if abs(value - round(value)) < 1e-6:
-        return float(int(round(value)))
-    rounded2 = round(value, 2)
-    if abs(value - rounded2) < 1e-6:
-        return rounded2
-    rounded3 = round(value, 3)
-    if abs(value - rounded3) < 1e-6:
-        return rounded3
-    return value
-
-
 def _build_symbolic_formula_mathtext(
     host_formula: str,
     dopant_species: List[str],
@@ -390,14 +366,14 @@ def _build_symbolic_formula_mathtext(
     Build a matplotlib mathtext formula string with bold element symbols and
     subscript letters for the dopant fractions.
 
-    The host formula (e.g. ``'Na2.75PS3.95'``) is the *doped* host-only
-    composition: the dopant species have already been stripped out and the
-    remaining host atoms are the displaced base.  For each host element the
-    base coefficient is therefore reconstructed by adding back the dopant
-    displacements it suffered (``base = doped + sum(c·letter)``) before the
-    symbolic ± terms are appended (e.g. ``Na_{2.75} → Na_{3-2x-y}``).  Each
-    dopant is rendered immediately after the last host element it displaces,
-    so a dopant sits next to the site it substitutes (e.g.
+    The host formula (e.g. ``'Na3PS4'``) is the *base* (undoped) host
+    composition: RASCBEC reconstructs it by adding the dopant displacements
+    back onto the doped host counts, so its coefficients are already the true
+    base stoichiometry.  For each host element displaced by a dopant the
+    symbolic ± terms are appended directly (e.g. ``Na_{3} → Na_{3-2x-y}``);
+    host elements that are not displaced render their bare base coefficient.
+    Each dopant is rendered immediately after the last host element it
+    displaces, so a dopant sits next to the site it substitutes (e.g.
     ``Na_{3-2x-y}Ca_{x}``).
 
     Element symbols use ``\\mathbf`` to match the bold title weight; the
@@ -405,7 +381,7 @@ def _build_symbolic_formula_mathtext(
 
     Parameters
     ----------
-    host_formula     : str  -- e.g. 'Na3PS4'
+    host_formula     : str  -- base host formula, e.g. 'Na3PS4'
     dopant_species   : list of str -- e.g. ['Ca', 'Cl']
     dopant_fractions : dict of str → float -- e.g. {'Ca': 0.125, 'Cl': 0.0625}
 
@@ -446,27 +422,9 @@ def _build_symbolic_formula_mathtext(
         c = -c
         return f"+{c}{l}" if c != 1 else f"+{l}"
 
-    def _base_coeff(el: str, doped_count) -> float:
-        """Reconstruct the base (undoped) coefficient for a host element.
-
-        ``host_formula`` holds the *doped* host-only composition, where every
-        displaced host atom has already been removed.  The base is recovered by
-        adding back the atoms each dopant took (or added) at this element:
-        ``base = doped + Σ DOPANT_SUBSTITUTIONS[sp][el] · fraction(sp)``.  This
-        is the inverse of what ``_signed`` renders, so the ±terms start from
-        the true base LLTO composition rather than the doped one.
-        """
-        base = doped_count
-        for sp in dopant_species:
-            coeff = DOPANT_SUBSTITUTIONS.get(sp, {}).get(el)
-            if coeff is not None:
-                base += coeff * dopant_fractions.get(sp, 0.0)
-        return _clean_coeff(base)
-
     parts = []
-    for i, (el, count) in enumerate(host_pairs):
+    for i, (el, base) in enumerate(host_pairs):
         sub = displaced_by.get(el, [])
-        base = _base_coeff(el, count)
         if not sub:
             # Braces are required whenever the subscript is more than one
             # character (e.g. '0.31', '12'); a bare ``_`` binds only the next
@@ -491,12 +449,14 @@ def build_raman_title(
     gamma: float,
     temperature: float,
     raw_activity: bool = False,
+    suffix: str = "Raman",
+    show_legend: bool = True,
 ) -> str:
     """
     Build a two-line Raman plot title.
 
-    Line 1: bold doped formula (mathtext) + Raman + dopant-fraction legend
-            (e.g. ``Na₃₋₂ₓ₋ᵧCaₓPS₄₋ᵧClᵧ Raman | x=0.125  y=0.0625``).
+    Line 1: bold doped formula (mathtext) + ``suffix`` + dopant-fraction legend
+            (e.g. ``Na₃₋₂ₓ₋ᵧCaₓPS₄₋ᵧClᵧ Raman | x=0.125 y=0.0625``).
     Line 2: run parameters — E, FWHM, T (or S(ν) when ``raw_activity=True``).
 
     Parameters
@@ -512,6 +472,13 @@ def build_raman_title(
         Sample temperature in K.
     raw_activity : bool, optional
         If True, show ``S(ν)`` instead of temperature in line 2.
+    suffix       : str, optional
+        Text following the formula on line 1 (default ``"Raman"``; use
+        ``"Raman Comparison"`` for multi-spectrum figures).
+    show_legend  : bool, optional
+        If True (default), append the ``x=…, y=…`` dopant-fraction legend to
+        line 1. Set False when the per-trace labels already carry the
+        dopant fractions (compare_raman.py waterfall).
 
     Returns
     -------
@@ -530,16 +497,18 @@ def build_raman_title(
             except ValueError:
                 pass
 
-    # Line 1: formula + legend
+    # Line 1: formula + suffix (+ legend when enabled)
     if dopant_pairs:
         dop_species   = [sp for sp, _ in dopant_pairs]
         dop_fractions = {sp: val for sp, val in dopant_pairs}
         formula_str = _build_symbolic_formula_mathtext(
             chem['formula'], dop_species, dop_fractions)
-        legend = " ".join(
-            f"{letters[i]}={dop_fractions[sp]:g}"
-            for i, sp in enumerate(dop_species))
-        line1 = f"${formula_str}$ Raman | {legend}"
+        line1 = f"${formula_str}$  {suffix}"
+        if show_legend:
+            legend = " ".join(
+                f"{letters[i]}={dop_fractions[sp]:.2f}"
+                for i, sp in enumerate(dop_species))
+            line1 += f"  |  {legend}"
     else:
         # Undoped: still render the host formula as subscripted mathtext
         # (e.g. Li3LaTiO3 -> Li_{3}LaTiO_{3}); previously fell back to
@@ -547,9 +516,9 @@ def build_raman_title(
         formula = chem.get('formula') or ''
         if formula:
             line1 = (f"${_build_symbolic_formula_mathtext(formula, [], {})}$"
-                     "  Raman")
+                     f"  {suffix}")
         else:
-            line1 = "  Raman"
+            line1 = f"  {suffix}"
 
     # Line 2: parameters
     line2_parts = []

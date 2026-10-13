@@ -70,6 +70,16 @@ normalizes the formula so Ti + Ga = 1 (e.g. Li60La90Ti150O360 with
 --bas Ti+Ga -> Li0.38La0.56Ti0.94O2.25, and dopant x-values reported
 per 160 Ti+Ga sites).
 
+Base (undoped) formula
+-----------------------
+The stored/`# Formula` value is the BASE host composition, not the raw
+doped host-only count. The supercell contains only the host atoms that were
+NOT displaced, so the base is recovered by adding back the atoms each dopant
+took (or added) at every host element (see DOPANT_SUBSTITUTIONS), then
+normalizing to the basis reference. E.g. a Ca-doped Na3PS4 supercell whose
+doped host counts are Na20P8S30 (Ca=1, Cl=2) is reported as the base
+Na3PS4, not Na2.5P1S3.75.
+
 CSV metadata header (parsed by compare_raman.py & plot_raman.py):
 # Formula: Na3PS4
 # Dopants: Ca=0.125 Cl=0.0625   <- omitted if undoped
@@ -103,6 +113,7 @@ from pymatgen.core import Element
 from plot_raman import (
     plot_raman_spectrum,
     build_raman_title,
+    DOPANT_SUBSTITUTIONS,
     DEFAULT_TEMP,
     DEFAULT_LASER_WL,
 )
@@ -903,22 +914,35 @@ def build_chemistry_metadata(species_names, species_n,
         resolved_bas_species = None
         bas_count = 1
 
-    # --- Build the formula label ---
-    # The host-only formula is always normalized to the SAME basis used for
-    # the dopant x-values, so a single reference applies everywhere. For a group
-    # basis (e.g. Ti+Ga) that means every host coefficient is divided by
-    # (n_Ti + n_Ga); because some of the Ti-site population is Ga, the host Ti
-    # coefficient reads below one (e.g. 0.9), correctly reflecting "Ti+Ga = 1".
-    # The dopant species themselves stay out of the host formula and are shown
-    # via the dopant metadata / plot title instead.
-    formula = (
-        host_formula(host_names, host_counts, ref=bas_count)
-        if host_names
-        else "Unknown"
-    )
-
     # Preserve the exact CLI order: --dops Ca Cl
     label_dops = list(explicit_dops) if explicit_dops is not None else list(dop_names)
+
+    # --- Build the formula label ---
+    # The stored formula is the BASE (undoped) host composition, not the raw
+    # doped host-only count.  The supercell only contains the host atoms that
+    # were NOT displaced, so the base is recovered by adding back the atoms
+    # each dopant took (or added) at every host element:
+    #     base[el] = doped_host[el] + Σ_sp DOPANT_SUBSTITUTIONS[sp][el] · n_sp
+    # (e.g. a Ca that displaces 2 Na contributes +2 Na back).  The base counts
+    # are then normalized to the SAME basis used for the dopant x-values, so a
+    # single reference applies everywhere. For a group basis (e.g. Ti+Ga) that
+    # means every host coefficient is divided by (n_Ti + n_Ga).
+    # The dopant species themselves stay out of the host formula and are shown
+    # via the dopant metadata / plot title instead.
+    if host_names:
+        base_counts = list(host_counts)
+        host_el_index = {el: i for i, el in enumerate(host_names)}
+        for sp in label_dops:
+            n_sp = int(species_count_map.get(sp, 0))
+            if n_sp == 0:
+                continue
+            for host_el, coeff in DOPANT_SUBSTITUTIONS.get(sp, {}).items():
+                j = host_el_index.get(host_el)
+                if j is not None:
+                    base_counts[j] += int(coeff * n_sp)
+        formula = host_formula(host_names, base_counts, ref=bas_count)
+    else:
+        formula = "Unknown"
 
     fractions = {
         name: float(species_count_map.get(name, 0)) / float(bas_count)
