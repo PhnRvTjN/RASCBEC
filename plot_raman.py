@@ -66,6 +66,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -81,6 +82,9 @@ THZCM1 = 33.356409519815204   # 1 THz in cm^-1 (c = 2.99792458e10 cm/s)
 KB_CM1 = 0.69503476           # Boltzmann constant kB in cm^-1 / K
 DEFAULT_TEMP = 350.0          # Default sample temperature in Kelvin
 DEFAULT_LASER_WL = 632.8      # Default excitation laser wavelength in nm
+ASPECT_RATIO = 1.618          # Golden ratio for figure width/height when auto-scaling
+UWM_GOLD = "#ffbd00"        # Underwater Materials gold for titles / labels
+UWM_GREY = "#666666"        # Underwater Materials grey for titles / labels
 
 
 # ---------------------------------------------------------------------------
@@ -477,6 +481,36 @@ def formula_to_mathtext(formula: str, dopants: str = "") -> str:
     return f"${_build_symbolic_formula_mathtext(formula, [sp for sp, _ in pairs], {sp: v for sp, v in pairs})}$"
 
 
+def select_title_line(title: str, which: str = "both") -> str:
+    """Return the full title, or only its first (line1) or second (line2) line.
+
+    A two-line Raman title is ``line1\\nline2`` where line1 is the chemical
+    formula line and line2 is the run-parameter line (E, FWHM, T / S(ν)).
+
+    Parameters
+    ----------
+    title : str
+        The full title string (may or may not contain a line break).
+    which : str, optional
+        One of ``'both'`` (default, unchanged), ``'line1'`` (formula line only),
+        or ``'line2'`` (parameter line only).
+
+    Returns
+    -------
+    str
+        The selected line. Titles without a line break are returned unchanged
+        regardless of ``which`` (so custom single-line titles are unaffected).
+    """
+    if which == "both" or "\n" not in title:
+        return title
+    lines = title.split("\n")
+    if which == "line1":
+        return lines[0]
+    if which == "line2":
+        return lines[-1] if len(lines) > 1 else title
+    return title
+
+
 def build_raman_title(
     chem: dict,
     E: Optional[float],
@@ -608,6 +642,76 @@ def _build_plot_title_from_csv(
     )
 
 
+def select_labeled_peaks(
+    y: np.ndarray,
+    freqs: np.ndarray,
+    n_labels: int,
+    min_label_sep: float,
+    prominence_frac: float,
+) -> List[int]:
+    """
+    Select up to ``n_labels`` peak indices for labelling, ranked by prominence.
+
+    Peaks are found with ``scipy.signal.find_peaks`` using a *prominence*
+    threshold (``prominence_frac`` of the trace's peak-to-baseline span) rather
+    than a relative-height threshold. Prominence measures how far a peak rises
+    above the local baseline it sits on, so a genuine peak riding the flank of
+    a stronger one is still detected, while a tiny ripple is not.
+
+    Candidates are then ranked by prominence and kept greedily so that no two
+    kept peaks are within ``min_label_sep`` (cm^-1). A candidate that violates
+    the separation rule is treated as a split Lorentzian shoulder and merged
+    into the dominant nearby label (i.e. dropped), so a single broad peak never
+    yields two neighbouring labels.
+
+    Parameters
+    ----------
+    y : np.ndarray
+        Broadened spectrum (1-D) over ``freqs``.
+    freqs : np.ndarray
+        Frequency grid in cm^-1 matching ``y``.
+    n_labels : int
+        Maximum number of peaks to label (0 selects none).
+    min_label_sep : float
+        Minimum cm^-1 separation between labelled peaks; smaller candidates are
+        merged into the stronger nearby peak (0 disables merging).
+    prominence_frac : float
+        Prominence threshold as a fraction of the trace's peak-to-baseline span
+        (e.g. 0.01 = 1%).
+
+    Returns
+    -------
+    list of int
+        Indices into ``y`` / ``freqs`` of the chosen peaks, strongest first.
+    """
+    if y.size == 0 or n_labels <= 0 or float(y.max()) <= 0.0:
+        return []
+
+    prominence = prominence_frac * (float(y.max()) - float(y.min()))
+
+    # Distance in grid points (avoids find_peaks returning a peak and its
+    # shoulder as two separate candidates); the label-separation rule below
+    # does the final merging.
+    grid_spacing = float(np.mean(np.diff(freqs))) if freqs.size > 1 else 1.0
+    min_dist = (max(int(np.ceil(min_label_sep / grid_spacing)), 1)
+                if min_label_sep > 0 else 1)
+
+    peaks, props = find_peaks(y, prominence=prominence, distance=min_dist)
+    if peaks.size == 0:
+        return []
+
+    prominences = props["prominences"]
+    order = np.argsort(-prominences)
+    chosen: List[int] = []
+    for j in order:
+        if len(chosen) >= n_labels:
+            break
+        pk = int(peaks[j])
+        if all(abs(freqs[pk] - freqs[q]) >= min_label_sep for q in chosen):
+            chosen.append(pk)
+    return chosen
+
+
 def plot_raman_spectrum(
     dat_file: Union[str, Path],
     out_png: Optional[Union[str, Path]] = None,
@@ -616,10 +720,16 @@ def plot_raman_spectrum(
     freq_max: Optional[float] = None,
     sticks: bool = True,
     n_labels: int = 10,
+    min_label_sep: float = 10.0,
+    prominence: float = 0.01,
     title: Optional[str] = None,
     raw_activity: bool = False,
     temperature: float = DEFAULT_TEMP,
     laser_wl: float = DEFAULT_LASER_WL,
+    grid: str = "both",
+    x_lines: Optional[List[float]] = None,
+    y_lines: Optional[List[float]] = None,
+    title_line: str = "both",
 ) -> None:
     """
     Read a RASCBEC CSV output, apply thermal/Stokes conversion and Lorentzian broadening, and save a plot.
@@ -647,6 +757,13 @@ def plot_raman_spectrum(
         Whether to overlay stick spectrum (default: True).
     n_labels : int, optional
         Number of peak labels to annotate (default: 10).
+    min_label_sep : float, optional
+        Minimum cm^-1 separation between labelled peaks; a candidate closer
+        than this to a stronger labelled peak is merged into it (a split
+        Lorentzian shoulder, default: 10; set 0 to disable).
+    prominence : float, optional
+        Prominence threshold as a fraction of the trace's peak-to-baseline span
+        used to detect labellable peaks (default: 0.01 = 1%).
     title : str, optional
         Custom plot title (default: auto-generated from CSV metadata).
     raw_activity : bool, optional
@@ -655,6 +772,18 @@ def plot_raman_spectrum(
         Sample temperature in Kelvin for Bose-Einstein factor (default: 350.0 K).
     laser_wl : float, optional
         Laser excitation wavelength in nm for (nu_L - nu)^4 factor (default: 532.0 nm).
+    grid : str, optional
+        Grid visibility: 'both' (default, x and y grids), 'x' (x grid only),
+        'y' (y grid only), or 'none' (no grid).
+    x_lines : list of float, optional
+        If given, draw a vertical reference line at each of these x-axis
+        (wavenumber) values in cm^-1 (e.g. ``[420.0]`` to mark a peak position).
+    y_lines : list of float, optional
+        If given, draw a horizontal reference line at each of these y-axis
+        values (e.g. ``[1.0]`` to mark the normalised peak height).
+    title_line : str, optional
+        Which auto-generated title line to show: 'both' (default), 'line1', or
+        'line2'. Custom ``title`` values are displayed as-is regardless.
     """
     if gamma <= 0:
         raise ValueError(f"gamma must be positive; got {gamma}")
@@ -728,22 +857,16 @@ def plot_raman_spectrum(
     else:
         ax.legend(loc='upper right')
 
-    # Label prominent peaks with overlap guard
+    # Label prominent peaks (prominence-ranked, split-Lorentzian shoulders
+    # merged within min_label_sep -- see select_labeled_peaks).
     if n_labels > 0:
-        min_dist = max(int(5000 / (freq_max - freq_min) * 10), 1)
-        peaks, _ = find_peaks(spectrum, height=0.05, distance=min_dist)
-        top_peaks = sorted(peaks, key=lambda p: -spectrum[p])[:n_labels]
-        top_peaks = sorted(top_peaks)
-
-        dx_guard = float(freq_max - freq_min) * 0.01
-        labeled: List[float] = []
-
-        for pk in top_peaks:
+        for pk in select_labeled_peaks(
+                spectrum, x,
+                n_labels=n_labels,
+                min_label_sep=min_label_sep,
+                prominence_frac=prominence):
             peak_freq = float(x[pk])
             peak_y = float(spectrum[pk])
-
-            if any(abs(peak_freq - ux) < dx_guard for ux in labeled):
-                continue
 
             if has_irreps and len(freqs_cm1) > 0:
                 closest_idx = int(np.argmin(np.abs(freqs_cm1 - peak_freq)))
@@ -764,17 +887,45 @@ def plot_raman_spectrum(
                 ha="center",
                 linespacing=1.0,
             )
-            labeled.append(peak_freq)
 
     ax.set_xlim(freq_min, freq_max)
     ax.set_ylim(0, y_top)
     ax.set_xlabel(r"Wavenumber (cm$^{-1}$)")
     ax.set_ylabel("Intensity (arb. units)")
-    ax.grid(axis="both")
 
-    plot_title = title if title is not None else _build_plot_title_from_csv(
-        dat_file, gamma, raw_activity=raw_activity, temperature=temperature
-    )
+    # Grid visibility (default 'both' preserves the original behaviour).
+    if grid == "both":
+        ax.xaxis.grid(True)
+        ax.yaxis.grid(True)
+    elif grid == "x":
+        ax.xaxis.grid(True)
+        ax.yaxis.grid(False)
+    elif grid == "y":
+        ax.xaxis.grid(False)
+        ax.yaxis.grid(True)
+    else:  # "none"
+        ax.xaxis.grid(False)
+        ax.yaxis.grid(False)
+
+    # Optional vertical reference lines at user-selected x-axis (wavenumber) values.
+    if x_lines:
+        for xv in x_lines:
+            ax.axvline(xv, color=UWM_GREY, lw=0.8, ls="--", alpha=0.7, zorder=2)
+
+    # Optional horizontal reference lines at user-selected y-axis values.
+    if y_lines:
+        for yv in y_lines:
+            ax.axhline(yv, color=UWM_GREY, lw=0.8, ls="--", alpha=0.7, zorder=2)
+
+    if title is not None:
+        plot_title = title
+    else:
+        plot_title = _build_plot_title_from_csv(
+            dat_file, gamma, raw_activity=raw_activity, temperature=temperature
+        )
+        # --title line1/line2 selects one line of the auto-generated title; a
+        # custom --title is shown as-is.
+        plot_title = select_title_line(plot_title, title_line)
     ax.set_title(plot_title)
 
     fig.tight_layout()
@@ -809,12 +960,34 @@ if __name__ == '__main__':
                    help='Hide stick spectrum')
     p.add_argument('--n-labels', type=int, default=10,
                    help='Number of peak labels to annotate (default: 10)')
+    p.add_argument('--min-label-sep', type=float, default=10.0,
+                   help='Minimum cm^-1 separation between labelled peaks; a '
+                        'closer candidate is merged into the stronger peak '
+                        '(default: 10; set 0 to disable).')
+    p.add_argument('--prominence', type=float, default=0.01,
+                   help='Prominence threshold (fraction of peak-to-baseline '
+                        'span) used to detect labellable peaks (default: 0.01)')
     p.add_argument('--title', type=str, default=None,
-                   help='Custom plot title (default: CSV filename stem)')
+                   help='Custom plot title (default: auto-generated). Pass '
+                        "'line1' or 'line2' to show only the formula line or "
+                        "only the parameters line of the auto-generated title.")
+    p.add_argument('--grid', choices=['both', 'x', 'y', 'none'], default='both',
+                   help='Grid visibility: both (default), x, y, or none')
+    p.add_argument('--x-line', type=float, nargs='+', default=None, metavar='X',
+                   help='Draw a vertical reference line at each of these '
+                        'x-axis (wavenumber) values in cm-1 (e.g. --x-line 420 600)')
+    p.add_argument('--y-line', type=float, nargs='+', default=None, metavar='Y',
+                   help='Draw a horizontal reference line at each of these '
+                        'y-axis values (e.g. --y-line 1.0 0.5)')
 
     args = p.parse_args()
 
     dat_file = args.dat if args.dat is not None else str(resolve_default_csv())
+
+    # --title line1/line2 selects a single line of the auto-generated title.
+    title, title_line = args.title, 'both'
+    if title in ('line1', 'line2'):
+        title, title_line = None, title
 
     plot_raman_spectrum(
         dat_file=dat_file,
@@ -824,8 +997,14 @@ if __name__ == '__main__':
         freq_max=args.freq_max,
         sticks=not args.no_sticks,
         n_labels=args.n_labels,
-        title=args.title,
+        min_label_sep=args.min_label_sep,
+        prominence=args.prominence,
+        title=title,
         raw_activity=args.raw_activity,
         temperature=args.temperature,
         laser_wl=args.laser_wl,
+        grid=args.grid,
+        x_lines=args.x_line,
+        y_lines=args.y_line,
+        title_line=title_line,
     )

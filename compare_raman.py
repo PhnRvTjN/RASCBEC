@@ -51,6 +51,9 @@ Constraints and Layout:
 -----------------------
 - --offset > 0 automatically applies --normalize-each if no norm flag is given.
 - Peak labels are shown ONLY in offset (waterfall) mode; default --n-labels 10.
+  Peaks are selected by prominence (not raw height) and kept at least
+  --min-label-sep (default 10) cm^-1 apart; a candidate inside that window of a
+  stronger peak is merged into it (split-Lorentzian shoulder) and dropped.
 - If no input files are given, every *.csv in --dir (default: cwd) is used.
 - In --offset (waterfall) mode, trace labels are drawn on the right of each
   trace (no legend), mirroring plot_raman_waterfall.py; without --offset the
@@ -90,20 +93,19 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgb
-from scipy.signal import find_peaks
 
-from plot_raman import build_raman_title, formula_to_mathtext
+from plot_raman import (
+    build_raman_title,
+    formula_to_mathtext,
+    select_labeled_peaks,
+    select_title_line,
+    STICK_A, STICK_LW, THZCM1, KB_CM1, DEFAULT_TEMP, DEFAULT_LASER_WL, ASPECT_RATIO, UWM_GOLD, UWM_GREY
+)
 
 # ---------------------------------------------------------------------------
 # Defaults (aligned with plot_raman.py / plot_raman_waterfall.py)
 # ---------------------------------------------------------------------------
-STICK_A = 0.6                 # stick alpha (pre-broadened stick intensity)
-STICK_LW = 0.8                # stick linewidth
-THZCM1 = 33.356409519815204   # 1 THz in cm^-1 (c = 2.99792458e10 cm/s)
-KB_CM1 = 0.69503476           # Boltzmann constant kB in cm^-1 / K
-DEFAULT_TEMP = 300.0          # Default room temperature in Kelvin
-DEFAULT_LASER_WL = 632.8      # Default excitation laser wavelength in nm
-
+UPPER_OFFSET_RATIO = 2.0      # Waterfall: upper padding = ratio x --offset (lower = 1 x --offset)
 
 # ---------------------------------------------------------------------------
 # Style (publication-ready rcParams; mirrors plot_raman_waterfall.py)
@@ -253,7 +255,7 @@ def activity_to_stokes_intensity(
     temperature : float, optional
         Sample temperature in Kelvin (default: 300.0 K).
     laser_wl_nm : float, optional
-        Excitation laser wavelength in nm (default: 532.0 nm).
+        Excitation laser wavelength in nm (default: 632.8 nm).
     freq_cutoff_cm1 : float, optional
         Minimum frequency threshold to avoid division by zero (default: 1.0 cm^-1).
 
@@ -432,6 +434,7 @@ def dopant_fraction_label(meta: Dict) -> str:
         return ''
     return "\n".join(
         f"$\\mathbf{{{letters[i]}}}_{{{sp}}}={val:.2f}$" for i, (sp, val) in enumerate(pairs))
+        # f"${letters[i]}={val:.2f}$" for i, (sp, val) in enumerate(pairs))
 
 
 def build_legend_labels(all_meta: List[Dict], files: List[str]) -> Tuple[List[str], bool]:
@@ -485,32 +488,57 @@ def parse_args():
 
     norm = p.add_mutually_exclusive_group()
     norm.add_argument('--normalize', action='store_true',
-                      help='Normalise all spectra to the global maximum '
+                      help='Normalize all spectra to the global maximum '
                            '(preserves relative intensities between compositions)')
     norm.add_argument('--normalize-each', action='store_true',
-                      help='Normalise each spectrum to its own maximum '
+                      help='Normalize each spectrum to its own maximum '
                            '(pure peak-shape / position comparison; default when --offset is given)')
 
     p.add_argument('--offset', type=float, default=0.0,
-                   help='Vertical baseline offset between spectra for '
-                        'waterfall view (default: 0 = overlaid). '
-                        'Automatically applies --normalize-each unless --normalize is given.')
+                   help='Lower padding below each spectrum for waterfall view '
+                        f'(default: 0 = overlaid); upper padding above each '
+                        f'spectrum is {UPPER_OFFSET_RATIO:g}x this value '
+                        f'(see UPPER_OFFSET_RATIO). Automatically applies '
+                        '--normalize-each unless --normalize is given.')
     p.add_argument('--sticks', action='store_true',
                    help='Overlay stick (bar) spectrum for each composition')
     p.add_argument('--n-labels', type=int, default=10,
                    help='Number of peak frequency labels per spectrum in '
                         'waterfall mode (default: 10; set 0 to disable).')
+    p.add_argument('--min-label-sep', type=float, default=10.0,
+                   help='Minimum separation in cm^-1 between labelled peaks '
+                        'in waterfall mode (default: 10; set 0 to disable).')
+    p.add_argument('--prominence', type=float, default=0.01,
+                   help='Prominence threshold (fraction of peak-to-baseline '
+                        'span) used to detect labellable peaks (default: 0.01)')
     p.add_argument('--labels', nargs='+', default=None,
                    help='Custom legend labels, one per file in order')
     p.add_argument('--temperature', type=float, default=DEFAULT_TEMP,
                    help='Sample temperature in K for Bose-Einstein factor (default: 300.0 K)')
     p.add_argument('--laser-wl', type=float, default=DEFAULT_LASER_WL,
-                   help='Excitation laser wavelength in nm (default: 532.0 nm)')
+                   help='Excitation laser wavelength in nm '
+                        f'(default: {DEFAULT_LASER_WL:g} nm)')
     p.add_argument('--raw-activity', action='store_true',
                    help='Plot raw Raman activities S(nu) without 1/nu or thermal Bose factors')
     p.add_argument('--title', type=str, default=None,
-                   help='Custom figure title (default: auto-generated; '
-                        'pass an empty string --title "" to omit the title)')
+                   help='Custom figure title (default: auto-generated). Pass '
+                        "'line1' or 'line2' to show only the formula line or "
+                        "only the parameters line of the auto-generated title, "
+                        'or an empty string --title "" to omit the title.')
+    p.add_argument('--grid', choices=['both', 'x', 'y', 'none'], default='x',
+                   help='Grid visibility: x (default), both, y, or none')
+    p.add_argument('--figsize', type=float, nargs='+', default=None,
+                   metavar=('WIDTH', 'HEIGHT'),
+                   help='Override figure size in inches (default: auto from '
+                        'data range / offset). Pass one value for a square '
+                        'figure (e.g. --figsize 8) or two for WIDTH HEIGHT '
+                        '(e.g. --figsize 6 8).')
+    p.add_argument('--x-line', type=float, nargs='+', default=None, metavar='X',
+                   help='Draw a vertical reference line at each of these '
+                        'x-axis (wavenumber) values in cm-1 (e.g. --x-line 420 600)')
+    p.add_argument('--y-line', type=float, nargs='+', default=None, metavar='Y',
+                   help='Draw a horizontal reference line at each of these '
+                        'y-axis values (e.g. --y-line 1.0 0.5)')
     p.add_argument('--out', default=None,
                    help='Output PNG filename (default: compare_<formula>_<mode>_<norm>.png)')
     return p.parse_args()
@@ -556,9 +584,21 @@ def main():
 
     gamma = args.gamma * THZCM1
 
+    # Full range spanning every mode (with a 50 cm^-1 margin each side). The
+    # broadened spectrum is always built and normalized on this full range, so
+    # a custom --freq-min/--freq-max zoom window can never truncate the
+    # spectrum (or a Lorentzian peak/tail) before the max is determined.
+    full_min = min(fq.min() for fq in all_freqs) - 50.0
+    full_max = max(fq.max() for fq in all_freqs) + 50.0
+    x = np.linspace(full_min, full_max, 10000)
+
+    # Displayed (zoomed) window
     freq_min = args.freq_min
-    freq_max = args.freq_max or (max(fq.max() for fq in all_freqs) + 50.0)
-    x = np.linspace(freq_min, freq_max, 5000)
+    freq_max = args.freq_max or full_max
+    if not (full_min <= freq_min < freq_max <= full_max):
+        print(f"  (note: zoom window [{freq_min:g}, {freq_max:g}] falls outside the "
+              f"data range [{full_min:g}, {full_max:g}]; plotting the full range instead)")
+        freq_min, freq_max = full_min, full_max
 
     # Compute mode weights (Stokes intensity or raw activity)
     all_weights = []
@@ -579,7 +619,9 @@ def main():
         for freqs, weights in zip(all_freqs, all_weights)
     ]
 
-    # Normalisation
+    # Normalisation is always based on the FULL spectrum, even when the plot
+    # is zoomed to a custom --freq-min/--freq-max window, so zooming never
+    # rescales the traces.
     if args.normalize_each:
         spectra = [s / s.max() if s.max() > 0 else s for s in spectra]
         y_label = 'Intensity (normalized per spectrum)' if not args.raw_activity else 'Activity (normalized per spectrum)'
@@ -592,6 +634,12 @@ def main():
     else:
         y_label = 'Stokes Intensity (arb. units, absolute)' if not args.raw_activity else 'Raman Activity S(ν) (absolute)'
         norm_mode = 'abs'
+
+    # Mask to the displayed frequency window; all window-dependent quantities
+    # (trace-label position, peak labels, sticks) use vis, while normalisation
+    # above already used the full spectrum.
+    in_window = (x >= freq_min) & (x <= freq_max)
+    vis = [s[in_window] for s in spectra]
 
     auto_labels, efield_in_legend = build_legend_labels(all_meta, files)
     if args.labels:
@@ -625,6 +673,12 @@ def main():
               "Pass distinct --labels to disambiguate.)")
 
     # Figure title
+    # --title line1/line2 selects one line of the auto-generated title; it is
+    # not itself a custom title string.
+    title_line = "both"
+    if args.title in ("line1", "line2"):
+        title_line = args.title
+        args.title = None
     if args.title == "":
         plot_title = None
     elif args.title is not None:
@@ -676,35 +730,62 @@ def main():
 
     set_style()
     n = len(files)
-    fig_h = max(6, n * 1) if waterfall_mode else 4
-    fig, ax = plt.subplots(figsize=(6, fig_h))
+
+    # Waterfall baselines: --offset is the LOWER padding below each trace
+    # baseline; the UPPER padding above the baseline is UPPER_OFFSET_RATIO x
+    # offset, so --offset 0.5 gives 0.5 below and 1.0 above each baseline.
+    if waterfall_mode:
+        # Per-trace cell (baseline to next baseline): lower + upper padding.
+        cell = args.offset * (1.0 + UPPER_OFFSET_RATIO)
+        baselines = [args.offset + i * cell for i in range(n)]
+        # Stack extent: lower padding under the first trace + n cells.
+        stack_top = args.offset + n * cell
+    else:
+        baselines = [0.0] * n
+        stack_top = max(s.max() for s in vis) if vis else 1.0
+
+    fig_w = max(4, 6 * (freq_max - freq_min) / (full_max - full_min))
+    fig_h = max(ASPECT_RATIO * fig_w, args.offset * stack_top) if waterfall_mode else ASPECT_RATIO * fig_w
+
+    # --figsize overrides the auto-computed figure size (1 value = square).
+    if args.figsize is not None:
+        if len(args.figsize) == 1:
+            fig_w = fig_h = float(args.figsize[0])
+        elif len(args.figsize) == 2:
+            fig_w, fig_h = (float(v) for v in args.figsize)
+        else:
+            raise SystemExit("--figsize takes 1 (square) or 2 (WIDTH HEIGHT) values.")
+
+    fig, ax = plt.subplots(figsize = (fig_w, fig_h))
 
     colors = pick_colors(n)
 
     for i, (spectrum, freqs, weights, irreps, label, color) in enumerate(
             zip(spectra, all_freqs, all_weights, all_irreps, trace_labels, colors)):
 
-        baseline = i * args.offset
+        baseline = baselines[i]
         has_irreps = any(lbl != '' for lbl in irreps)
 
         # In non-waterfall mode the trace label goes into the legend box; in
         # waterfall mode it is drawn inline to the right of each trace.
-        ax.plot(x, spectrum + baseline, lw=1.6, color=color, zorder=4,
+        ax.plot(x[in_window], spectrum[in_window] + baseline, lw=1.6, color=color, zorder=4,
                 label=label if not waterfall_mode else None)
 
         if waterfall_mode:
-            label_dy = float(spectrum.max()) * 0.6 if spectrum.max() > 0 else 0.0
+            # Trace label sits 20% of the way up from this trace's minimum
+            # within the selected frequency window.
+            label_dy = float(vis[i].min()) + 0.2 * float(vis[i].max() - vis[i].min()) if args.offset > 0 else 0.2
             ax.text(
-                0.99*freq_max,
+                freq_max - 0.2 * (freq_max - freq_min),
                 baseline + label_dy,
                 f"{label}",
                 color=color,
                 fontsize=8,
                 fontweight="bold",
                 va="bottom",
-                ha="right",
+                ha="left",
                 zorder=5,
-                bbox=dict(facecolor="#cccccc", edgecolor="#cccccc", alpha=0.5, pad=1.0),
+                bbox=dict(facecolor="#cccccc", edgecolor="#cccccc", alpha=0.4, pad=1.0),
             )
 
         if args.sticks and freqs.size:
@@ -715,22 +796,25 @@ def main():
                               color=color, lw=STICK_LW, alpha=STICK_A, zorder=3)
 
         if show_labels:
-            min_dist = max(int(5000 / (freq_max - freq_min) * 15), 1)
-            peaks, _ = find_peaks(spectrum,
-                                  height=0.02 * spectrum.max(),
-                                  distance=min_dist)
-            top_peaks = sorted(peaks, key=lambda p: -spectrum[p])[:args.n_labels]
+            # Prominence-based peak selection with split-Lorentzian-shoulder
+            # merging (see select_labeled_peaks); indices are into vis[i].
+            top_peaks = select_labeled_peaks(
+                vis[i], x[in_window],
+                n_labels=args.n_labels,
+                min_label_sep=args.min_label_sep,
+                prominence_frac=args.prominence,
+            )
             for pk in top_peaks:
-                peak_freq = x[pk]
+                peak_freq = x[in_window][pk]
                 # if has_irreps and len(freqs) > 0:
                 #     closest_idx = int(np.argmin(np.abs(freqs - peak_freq)))
                 #     irrep = irreps[closest_idx]
                 #     label_text = f"{irrep}\n{peak_freq:.0f}"
                 # else:
-                label_text = f"{peak_freq:.0f}"
+                label_text = f"{peak_freq:.1f}"
                 ax.annotate(
                     label_text,
-                    xy=(peak_freq, spectrum[pk] + baseline),
+                    xy=(peak_freq, vis[i][pk] + baseline),
                     xytext=(0, 6), textcoords='offset points',
                     ha='center', va='bottom',
                     fontsize=8, color=color, linespacing=1.0)
@@ -742,8 +826,35 @@ def main():
     ax.set_ylim(bottom=0)
     ax.set_xlabel(r'Wavenumber (cm$^{-1}$)')
     ax.set_ylabel(y_label)
-    ax.xaxis.grid(True)
-    ax.yaxis.grid(False)
+
+    # Grid visibility (default 'x' preserves the original x-grid-only look).
+    if args.grid == "both":
+        ax.xaxis.grid(True)
+        ax.yaxis.grid(True)
+    elif args.grid == "x":
+        ax.xaxis.grid(True)
+        ax.yaxis.grid(False)
+    elif args.grid == "y":
+        ax.xaxis.grid(False)
+        ax.yaxis.grid(True)
+    else:  # "none"
+        ax.xaxis.grid(False)
+        ax.yaxis.grid(False)
+
+    # Optional vertical reference lines at user-selected x-axis (wavenumber) values.
+    if args.x_line:
+        for xv in args.x_line:
+            ax.axvline(xv, color="UWM_GREY", lw=0.8, ls="--", alpha=0.8, zorder=2)
+
+    # Optional horizontal reference lines at user-selected y-axis values.
+    if args.y_line:
+        for yv in args.y_line:
+            ax.axhline(yv, color="UWM_GREY", lw=0.8, ls="--", alpha=0.8, zorder=2)
+
+    # --title line1/line2 only affects the auto-generated title; a custom
+    # --title is shown as-is, and --title "" still omits the title entirely.
+    if plot_title is not None and args.title is None:
+        plot_title = select_title_line(plot_title, title_line)
     ax.set_title(plot_title)
 
     fig.tight_layout()

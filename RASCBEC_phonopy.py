@@ -11,7 +11,7 @@ variable mode count (filtered imaginary and acoustic modes),
 subdirectory-based OUTCAR paths (./1/OUTCAR, ./m1/OUTCAR, ...),
 chemistry-based output filenames derived from POSCAR composition,
 CSV metadata header (formula, dopants, file label, E-field),
-plot output option,
+plot output option,f
 auto-generated informative plot title,
 direct phonopy YAML input (qpoints.yaml or mesh.yaml + irreps.yaml),
 mode symmetry labels (irreps) in CSV and plot,
@@ -562,13 +562,13 @@ def compute_raman_activities(dq, eigvecs, nat, n_modes, atomic_mass, species_n):
 
     Implements Eqs. 7-8 of Zhang et al. (2025).
 
-    Phonopy eigenvectors are column-normalised but NOT mass-weighted.
+    Phonopy eigenvectors are column-normalized but NOT mass-weighted.
     Mass weighting (division by sqrt(m_t)) is applied here before the
     polarizability tensor is accumulated.
 
     Eq. 7 -- polarizability tensor contribution from atom t, mode s:
     R^{(t)}_{ij} = sum_k (dZ*_{ik}/dE_j)_t * e~_{tk}
-    where e~_{tk} = e_{tk} / sqrt(m_t)  (mass-normalised displacement).
+    where e~_{tk} = e_{tk} / sqrt(m_t)  (mass-normalized displacement).
 
     The full polarizability derivative tensor for mode s is:
     R_{ij} = sum_t R^{(t)}_{ij} / (4*pi*e0)
