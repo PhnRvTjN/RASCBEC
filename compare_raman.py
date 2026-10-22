@@ -37,18 +37,22 @@ Why this matters for multi-composition comparisons:
    low-frequency intensity by 4x to 7x relative to high-frequency Ti-O stretches
    (500-600 cm^-1).
 3. By default, this updated script converts all input CSV activities to physical
-   Stokes scattered intensities at T = 300 K (632.8 nm laser line), directly
+   Stokes scattered intensities at T = 350 K (632.8 nm laser line), directly
    matching experimental multi-composition waterfall comparisons. Raw activity
    comparison remains available via ``--raw-activity``.
 
 Backwards Compatibility with Legacy CSVs:
 -----------------------------------------
 No changes to existing CSV files are needed. The script parses existing 3- or
-4-column CSVs, checks for an optional 5th 'Intensity' column if present, and
-computes the thermal Stokes weights on the fly if not already present.
+4-column CSVs (with or without a trailing comment-header metadata block) and
+computes the thermal Stokes weights on the fly.
 
 Constraints and Layout:
 -----------------------
+- Frequency window: --freq-min defaults to 0 and --freq-max defaults to the
+  highest mode + 50 cm^-1 rounded to the nearest 100 cm^-1 (same as
+  plot_raman.py). A zoom window must be a valid min < max range that overlaps
+  the data; otherwise the auto range is used (a note is printed).
 - --offset > 0 automatically applies --normalize-each if no norm flag is given.
 - Peak labels are shown ONLY in offset (waterfall) mode; default --n-labels 10.
   Peaks are selected by prominence (not raw height) and kept at least
@@ -61,7 +65,7 @@ Constraints and Layout:
   Colours use the hue-sorted tab10 / turbo logic.
 
 Usage:
-    # Waterfall with Stokes conversion (T=300 K, default), all *.csv in cwd
+    # Waterfall with Stokes conversion (T=350 K, default), all *.csv in cwd
     python compare_raman.py --offset 1.2
 
     # Comparing columnar vs rock-salt LLTO arrangements
@@ -95,11 +99,10 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgb
 
 from plot_raman import (
-    build_raman_title,
-    formula_to_mathtext,
-    select_labeled_peaks,
-    select_title_line,
-    STICK_A, STICK_LW, THZCM1, KB_CM1, DEFAULT_TEMP, DEFAULT_LASER_WL, ASPECT_RATIO, UWM_GOLD, UWM_GREY
+    activity_to_stokes_intensity, build_raman_title, formula_to_mathtext, lorentzian,
+    read_raman_csv, select_labeled_peaks, select_title_line, set_style,
+    THZCM1, DEFAULT_LASER_WL, DEFAULT_TEMP,
+    STICK_A, STICK_LW, ASPECT_RATIO, UWM_GOLD, UWM_GREY
 )
 
 # ---------------------------------------------------------------------------
@@ -107,44 +110,8 @@ from plot_raman import (
 # ---------------------------------------------------------------------------
 UPPER_OFFSET_RATIO = 2.0      # Waterfall: upper padding = ratio x --offset (lower = 1 x --offset)
 
-# ---------------------------------------------------------------------------
-# Style (publication-ready rcParams; mirrors plot_raman_waterfall.py)
-# ---------------------------------------------------------------------------
-
-def set_style() -> None:
-    """Publication-ready matplotlib rcParams (same as plot_raman_waterfall)."""
-    plt.rcParams.update({
-        "figure.dpi": 200,
-        "savefig.dpi": 600,
-        "font.size": 10,
-        "axes.titlesize": 12,
-        "axes.labelsize": 10,
-        "axes.titleweight": "bold",
-        "axes.labelweight": "bold",
-        "axes.linewidth": 1.0,
-        "xtick.labelsize": 8,
-        "ytick.labelsize": 8,
-        "xtick.direction": "in",
-        "ytick.direction": "in",
-        "xtick.major.size": 4,
-        "ytick.major.size": 4,
-        "xtick.minor.size": 2,
-        "ytick.minor.size": 2,
-        "legend.fontsize": 8,
-        "legend.frameon": True,
-        "legend.framealpha": 0.6,
-        "legend.facecolor": "#cccccc",
-        "legend.edgecolor": "#cccccc",
-        "grid.alpha": 1.0,
-        "grid.linestyle": "--",
-        "grid.color": "#cccccc",
-        "grid.linewidth": 0.8,
-        "axes.grid": True,
-        "axes.spines.top": True,
-        "axes.spines.right": True,
-        "mathtext.default": "regular",
-    })
-
+# Note: the publication-ready rcParams come from plot_raman.set_style (see
+# import above); compare_raman applies it with compact=True in main().
 
 # ---------------------------------------------------------------------------
 # High-contrast colour selection (mirrors plot_raman_waterfall.py)
@@ -164,7 +131,7 @@ def pick_colors(n: int):
     Pick ``n`` high-contrast colours in rainbow order from tab10.
 
     Indices are evenly spaced across the hue-sorted palette so contrast
-    scales with series count. If n > 10, fall back to the ``turbo`` colormap.
+    scales with series count. If n >= 10, fall back to the ``turbo`` colormap.
     """
     if n <= 0:
         return []
@@ -194,96 +161,10 @@ def pick_colors(n: int):
 
 
 # ---------------------------------------------------------------------------
-# Physics conversion and Lorentzian broadening
+# Spectrum broadening
 # ---------------------------------------------------------------------------
-
-def lorentzian(x: np.ndarray, x0: float, A: float, gamma: float) -> np.ndarray:
-    """
-    Area-preserving Lorentzian broadening of a delta-function stick.
-
-    The integrated area under the curve equals A (the mode weight),
-    independent of gamma:
-
-    .. math::
-        L(x) = \\frac{1}{\\pi} \\frac{A (\\gamma / 2)}{(x - x_0)^2 + (\\gamma / 2)^2}
-
-    Parameters
-    ----------
-    x : np.ndarray
-        Frequency evaluation grid in cm^-1.
-    x0 : float
-        Peak centre in cm^-1.
-    A : float
-        Mode intensity / activity stick value.
-    gamma : float
-        Full width at half maximum (FWHM) in cm^-1.
-
-    Returns
-    -------
-    np.ndarray
-        Broadened Lorentzian intensity on the grid x.
-    """
-    half_gamma = gamma / 2.0
-    return (A * half_gamma) / (np.pi * ((x - x0)**2 + half_gamma**2))
-
-
-def activity_to_stokes_intensity(
-    freqs_cm1: np.ndarray,
-    activities: np.ndarray,
-    temperature: float = DEFAULT_TEMP,
-    laser_wl_nm: float = DEFAULT_LASER_WL,
-    freq_cutoff_cm1: float = 1.0,
-) -> np.ndarray:
-    """
-    Convert raw Raman activities to experimental Stokes scattered intensities.
-
-    Accounts for the harmonic oscillator coordinate amplitude scaling (1 / nu),
-    the thermal Bose-Einstein population factor [n(nu, T) + 1], and the dipole
-    radiation factor (nu_L - nu)^4:
-
-    .. math::
-        I(\\nu_k, T) = A_k \\times \\left( \\frac{\\nu_L - \\nu_k}{\\nu_L} \\right)^4
-                       \\times \\frac{1}{\\nu_k}
-                       \\times \\frac{1}{1 - \\exp\\left(-\\frac{h c \\nu_k}{k_B T}\\right)}
-
-    Parameters
-    ----------
-    freqs_cm1 : np.ndarray
-        Phonon frequencies in cm^-1.
-    activities : np.ndarray
-        Mode activities from RASCBEC (Placzek powder average: 45*a^2 + 7*g^2).
-    temperature : float, optional
-        Sample temperature in Kelvin (default: 300.0 K).
-    laser_wl_nm : float, optional
-        Excitation laser wavelength in nm (default: 632.8 nm).
-    freq_cutoff_cm1 : float, optional
-        Minimum frequency threshold to avoid division by zero (default: 1.0 cm^-1).
-
-    Returns
-    -------
-    np.ndarray
-        Converted Stokes intensities.
-    """
-    omega_L = 1.0e7 / laser_wl_nm
-    intensities = np.zeros_like(activities, dtype=float)
-
-    for i, (f, act) in enumerate(zip(freqs_cm1, activities)):
-        if act <= 0.0 or f <= freq_cutoff_cm1:
-            continue
-
-        x = f / (KB_CM1 * temperature)
-        if x > 700.0:
-            bose = 1.0
-        else:
-            bose = 1.0 / (1.0 - np.exp(-x))
-
-        laser_term = ((omega_L - f) / omega_L) ** 4
-        harmonic_term = 1.0 / f
-
-        intensities[i] = act * laser_term * harmonic_term * bose
-
-    return intensities
-
+# lorentzian() and activity_to_stokes_intensity() are imported from plot_raman
+# (see the import block above); they were previously duplicated here.
 
 def build_spectrum(
     freqs_cm1: np.ndarray,
@@ -321,48 +202,14 @@ def load_csv(filepath: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray, List[s
     """
     Load a RASCBEC CSV file. Returns (freqs_cm1, activities, irrep_labels, meta).
 
-    Handles both the legacy 3-column format (Mode, Freq_cm-1, Activity) and
-    the 4-column format (Mode, Freq_cm-1, Activity, Irrep). If a 5th column
-    exists (e.g. precomputed Stokes Intensity), activities are parsed from column 2
-    and can be optionally overridden.
-
-    Parameters
-    ----------
-    filepath : str or Path
-        Path to CSV file.
-
-    Returns
-    -------
-    freqs_cm1 : np.ndarray
-        Mode frequencies in cm^-1.
-    activities : np.ndarray
-        Mode activities from CSV.
-    irrep_labels : List[str]
-        Mode irreducible representations (empty strings if absent).
-    meta : dict
-        Metadata dictionary parsed from comment headers (# Formula, # Dopants, etc.).
+    Thin wrapper over the shared :func:`plot_raman.read_raman_csv`; the only
+    adjustment is keeping ``meta['e_field']`` as a string (or ``''`` when
+    absent) so the label/title code below can treat it as a plain string.
     """
-    meta = {'formula': '', 'dopants': '', 'file_label': '', 'e_field': ''}
-    freqs, acts, irreps = [], [], []
-    with open(filepath, 'r', encoding='utf-8') as f:
-        for line in f:
-            s = line.strip()
-            if s.startswith('# Formula:'):
-                meta['formula'] = s.split(':', 1)[1].strip()
-            elif s.startswith('# Dopants:'):
-                meta['dopants'] = s.split(':', 1)[1].strip()
-            elif s.startswith('# File_Label:'):
-                meta['file_label'] = s.split(':', 1)[1].strip()
-            elif s.startswith('# E_field:'):
-                meta['e_field'] = s.split(':', 1)[1].strip()
-            elif s.startswith('#') or not s:
-                continue
-            else:
-                parts = s.split(',')
-                freqs.append(float(parts[1]))
-                acts.append(float(parts[2]))
-                irreps.append(parts[3].strip() if len(parts) > 3 else '')
-    return np.array(freqs, dtype=float), np.array(acts, dtype=float), irreps, meta
+    freqs, acts, irreps, meta = read_raman_csv(filepath)
+    e = meta.get('e_field')
+    meta['e_field'] = '' if e is None else str(e)
+    return freqs, acts, irreps, meta
 
 
 def filename_fallback(filepath: Union[str, Path]) -> Tuple[str, str]:
@@ -391,8 +238,8 @@ def chem_label(meta: Dict, filepath: Union[str, Path]) -> str:
     mathtext string (e.g. ``$\\mathbf{Na}_{3}\\mathbf{P}\\mathbf{S}_{4}$``),
     matching how the figure title renders it; if the formula is missing,
     falls back to the filename tag. When a non-"Undoped" dopant string is
-    present, returns ``[Dopants]`` (the main label loop replaces this with the
-    subscript dopant-fraction legend).
+    present, returns ``[Dopants]`` (``build_trace_labels`` replaces this with
+    the subscript dopant-fraction legend).
     """
     formula = meta.get('formula', '')
     dopants = meta.get('dopants', '')
@@ -434,7 +281,6 @@ def dopant_fraction_label(meta: Dict) -> str:
         return ''
     return "\n".join(
         f"$\\mathbf{{{letters[i]}}}_{{{sp}}}={val:.2f}$" for i, (sp, val) in enumerate(pairs))
-        # f"${letters[i]}={val:.2f}$" for i, (sp, val) in enumerate(pairs))
 
 
 def build_legend_labels(all_meta: List[Dict], files: List[str]) -> Tuple[List[str], bool]:
@@ -472,20 +318,36 @@ def parse_args():
         description='Compare Raman spectra from multiple RASCBEC CSV files with Stokes thermal conversion.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__)
+    # --- input / output ---
     p.add_argument('files', nargs='*',
                    help='Input CSV files (shell glob patterns accepted). '
                         'If omitted, all *.csv in --dir are used.')
     p.add_argument('--dir', type=str, default='.',
                    help='Directory to search for *.csv input files when no '
                         'files are given on the command line (default: cwd).')
+    p.add_argument('--out', default=None,
+                   help='Output PNG filename (default: compare_<formula>_<mode>_<norm>.png)')
+
+    # --- physical model (what is plotted and under what conditions) ---
+    p.add_argument('--temperature', type=float, default=DEFAULT_TEMP,
+                   help='Sample temperature in K for Bose-Einstein factor (default: 350.0 K)')
+    p.add_argument('--laser-wl', type=float, default=DEFAULT_LASER_WL,
+                   help='Excitation laser wavelength in nm '
+                        f'(default: {DEFAULT_LASER_WL:g} nm)')
+    p.add_argument('--raw-activity', action='store_true',
+                   help='Plot raw Raman activities S(nu) without 1/nu or thermal Bose factors')
     p.add_argument('--gamma', type=float, default=0.25,
                    help='Lorentzian FWHM in THz (default: 0.25 THz); converted '
                         'to cm^-1 internally via THZCM1.')
+
+    # --- displayed frequency window (cm^-1) ---
     p.add_argument('--freq-min', type=float, default=0.0,
                    help='Lower x-axis limit in cm^-1 (default: 0)')
     p.add_argument('--freq-max', type=float, default=None,
-                   help='Upper x-axis limit in cm^-1 (default: auto)')
+                   help='Upper x-axis limit in cm^-1 (default: auto = highest '
+                        'mode + 50 cm^-1, rounded to the nearest 100 cm^-1)')
 
+    # --- normalization ---
     norm = p.add_mutually_exclusive_group()
     norm.add_argument('--normalize', action='store_true',
                       help='Normalize all spectra to the global maximum '
@@ -494,14 +356,19 @@ def parse_args():
                       help='Normalize each spectrum to its own maximum '
                            '(pure peak-shape / position comparison; default when --offset is given)')
 
+    # --- waterfall ---
     p.add_argument('--offset', type=float, default=0.0,
                    help='Lower padding below each spectrum for waterfall view '
                         f'(default: 0 = overlaid); upper padding above each '
                         f'spectrum is {UPPER_OFFSET_RATIO:g}x this value '
                         f'(see UPPER_OFFSET_RATIO). Automatically applies '
                         '--normalize-each unless --normalize is given.')
+
+    # --- stick spectrum ---
     p.add_argument('--sticks', action='store_true',
                    help='Overlay stick (bar) spectrum for each composition')
+
+    # --- peak labels ---
     p.add_argument('--n-labels', type=int, default=10,
                    help='Number of peak frequency labels per spectrum in '
                         'waterfall mode (default: 10; set 0 to disable).')
@@ -511,20 +378,19 @@ def parse_args():
     p.add_argument('--prominence', type=float, default=0.01,
                    help='Prominence threshold (fraction of peak-to-baseline '
                         'span) used to detect labellable peaks (default: 0.01)')
+
+    # --- trace labels ---
     p.add_argument('--labels', nargs='+', default=None,
                    help='Custom legend labels, one per file in order')
-    p.add_argument('--temperature', type=float, default=DEFAULT_TEMP,
-                   help='Sample temperature in K for Bose-Einstein factor (default: 300.0 K)')
-    p.add_argument('--laser-wl', type=float, default=DEFAULT_LASER_WL,
-                   help='Excitation laser wavelength in nm '
-                        f'(default: {DEFAULT_LASER_WL:g} nm)')
-    p.add_argument('--raw-activity', action='store_true',
-                   help='Plot raw Raman activities S(nu) without 1/nu or thermal Bose factors')
+
+    # --- title ---
     p.add_argument('--title', type=str, default=None,
                    help='Custom figure title (default: auto-generated). Pass '
                         "'line1' or 'line2' to show only the formula line or "
                         "only the parameters line of the auto-generated title, "
                         'or an empty string --title "" to omit the title.')
+
+    # --- decorations (grid, figure size & reference lines) ---
     p.add_argument('--grid', choices=['both', 'x', 'y', 'none'], default='x',
                    help='Grid visibility: x (default), both, y, or none')
     p.add_argument('--figsize', type=float, nargs='+', default=None,
@@ -539,8 +405,6 @@ def parse_args():
     p.add_argument('--y-line', type=float, nargs='+', default=None, metavar='Y',
                    help='Draw a horizontal reference line at each of these '
                         'y-axis values (e.g. --y-line 1.0 0.5)')
-    p.add_argument('--out', default=None,
-                   help='Output PNG filename (default: compare_<formula>_<mode>_<norm>.png)')
     return p.parse_args()
 
 
@@ -548,32 +412,21 @@ def parse_args():
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    args = parse_args()
-
+def resolve_input_files(args) -> List[str]:
+    """Resolve the input CSV files (explicit args or a glob of --dir)."""
     if args.files:
         files = expand_globs(args.files)
     else:
         files = sorted(_glob.glob(str(Path(args.dir) / "*.csv")))
-        if not files:
-            raise SystemExit(
-                "No input CSV files found. "
-                "Pass file paths or use --dir to point at a folder of *.csv.")
+    if not files:
+        raise SystemExit(
+            "No input CSV files found. "
+            "Pass file paths or use --dir to point at a folder of *.csv.")
+    return files
 
-    waterfall_mode = args.offset > 0
-    if waterfall_mode and not args.normalize and not args.normalize_each:
-        args.normalize_each = True
-        print("  (auto: --normalize-each applied because --offset > 0)")
 
-    show_labels = args.n_labels > 0 and waterfall_mode
-    if args.n_labels > 0 and not waterfall_mode:
-        print("  (note: peak labels are shown only in --offset waterfall mode)")
-
-    mode_str = "Raw Activity S(nu)" if args.raw_activity else f"Stokes Intensity (T={args.temperature:g} K, {args.laser_wl:g} nm)"
-    print(f"Comparing {len(files)} spectra [{mode_str}]:")
-    for f in files:
-        print(f"  {Path(f).name}")
-
+def load_all(files: List[str]):
+    """Load every CSV into parallel lists of (freqs, acts, irreps, meta)."""
     all_freqs, all_acts, all_irreps, all_meta = [], [], [], []
     for f in files:
         freqs, acts, irreps, meta = load_csv(f)
@@ -581,24 +434,61 @@ def main():
         all_acts.append(acts)
         all_irreps.append(irreps)
         all_meta.append(meta)
+    return all_freqs, all_acts, all_irreps, all_meta
 
+
+def build_all_spectra(all_freqs, all_acts, args):
+    """Build broadened spectra on a common grid that contains the display window.
+
+    The resolution grid always spans every mode plus a 50 cm^-1 margin and also
+    contains the displayed window, so a custom --freq-min/--freq-max zoom can
+    never truncate a Lorentzian peak/tail before the max is determined. When
+    --freq-max is not given, the auto upper axis limit mirrors plot_raman.py:
+    the highest mode + 50 cm^-1, rounded to the nearest 100 cm^-1.
+
+    Returns
+    -------
+    spectra, x, in_window, full_min, full_max, freq_min, freq_max, all_weights
+    """
     gamma = args.gamma * THZCM1
 
-    # Full range spanning every mode (with a 50 cm^-1 margin each side). The
-    # broadened spectrum is always built and normalized on this full range, so
-    # a custom --freq-min/--freq-max zoom window can never truncate the
-    # spectrum (or a Lorentzian peak/tail) before the max is determined.
-    full_min = min(fq.min() for fq in all_freqs) - 50.0
-    full_max = max(fq.max() for fq in all_freqs) + 50.0
-    x = np.linspace(full_min, full_max, 10000)
+    # Data range spanning every mode.
+    data_min = min(fq.min() for fq in all_freqs)
+    data_max = max(fq.max() for fq in all_freqs)
 
-    # Displayed (zoomed) window
+    # Auto (default) range mirrors plot_raman.py: lower bound 0; upper bound the
+    # highest mode plus a 50 cm^-1 margin, rounded to the nearest 100 cm^-1 so
+    # the axis lands on a "nice" value rather than a raw one (e.g. 670.9 -> 700).
+    auto_freq_min = 0.0
+    auto_freq_max = round((data_max + 50.0) / 100) * 100
+
+    # Displayed (zoomed) window: the user's --freq-min/--freq-max, defaulting to
+    # the auto range above when they are not given.
     freq_min = args.freq_min
-    freq_max = args.freq_max or full_max
-    if not (full_min <= freq_min < freq_max <= full_max):
-        print(f"  (note: zoom window [{freq_min:g}, {freq_max:g}] falls outside the "
-              f"data range [{full_min:g}, {full_max:g}]; plotting the full range instead)")
-        freq_min, freq_max = full_min, full_max
+    freq_max = args.freq_max if args.freq_max is not None else auto_freq_max
+
+    # Fall back to the auto range on clear user error: an inverted window
+    # (freq_min >= freq_max), or an explicit --freq-max that misses the data
+    # entirely (almost always a typo). This honours a deliberate partial zoom
+    # while keeping a peak from being cut off by accident.
+    inverted = not (freq_min < freq_max)
+    misses_data = (args.freq_max is not None
+                   and not (freq_min <= data_max and freq_max >= data_min))
+    if inverted or misses_data:
+        reason = ("not a valid window (need --freq-min < --freq-max)" if inverted
+                  else f"misses the data range [{data_min:g}, {data_max:g}]")
+        print(f"  (note: window [{freq_min:g}, {freq_max:g}] {reason}; "
+              f"using the auto range [{auto_freq_min:g}, {auto_freq_max:g}] instead)")
+        freq_min, freq_max = auto_freq_min, auto_freq_max
+
+    # Resolution grid: covers every mode (with a 50 cm^-1 margin) and always
+    # contains the displayed window. The broadened spectrum is built and
+    # normalised on this full range, so a custom --freq-min/--freq-max zoom can
+    # never truncate a Lorentzian peak/tail (or change the peak used for
+    # normalisation) before the max is determined.
+    full_min = min(data_min - 50.0, freq_min)
+    full_max = max(data_max + 50.0, freq_max)
+    x = np.linspace(full_min, full_max, 10000)
 
     # Compute mode weights (Stokes intensity or raw activity)
     all_weights = []
@@ -619,28 +509,39 @@ def main():
         for freqs, weights in zip(all_freqs, all_weights)
     ]
 
-    # Normalisation is always based on the FULL spectrum, even when the plot
-    # is zoomed to a custom --freq-min/--freq-max window, so zooming never
-    # rescales the traces.
+    # Mask to the displayed frequency window; all window-dependent quantities
+    # (trace-label position, peak labels, sticks) use in_window, while
+    # normalisation uses the full spectrum.
+    in_window = (x >= freq_min) & (x <= freq_max)
+
+    return (spectra, x, in_window, full_min, full_max,
+            freq_min, freq_max, all_weights)
+
+
+def normalize_spectra(spectra: List[np.ndarray], args) -> Tuple[List[np.ndarray], str, str]:
+    """Normalize the spectra and return (spectra, y_label, norm_mode).
+
+    Normalisation is always based on the FULL spectrum, even when the plot is
+    zoomed to a custom --freq-min/--freq-max window, so zooming never
+    rescales the traces.
+    """
     if args.normalize_each:
         spectra = [s / s.max() if s.max() > 0 else s for s in spectra]
-        y_label = 'Intensity (normalized per spectrum)' if not args.raw_activity else 'Activity (normalized per spectrum)'
+        y_label = 'Intensity (simulated, normalized per spectrum)' if not args.raw_activity else 'Activity (normalized per spectrum)'
         norm_mode = 'enorm'
     elif args.normalize:
         gmax = max(s.max() for s in spectra)
         spectra = [s / gmax if gmax > 0 else s for s in spectra]
-        y_label = 'Intensity (normalized to global max)' if not args.raw_activity else 'Activity (normalized to global max)'
+        y_label = 'Intensity (simulated, normalized to global max)' if not args.raw_activity else 'Activity (normalized to global max)'
         norm_mode = 'gnorm'
     else:
-        y_label = 'Stokes Intensity (arb. units, absolute)' if not args.raw_activity else 'Raman Activity S(ν) (absolute)'
+        y_label = 'Stokes Intensity (simulated, arb. units, absolute)' if not args.raw_activity else 'Raman Activity S(ν) (absolute)'
         norm_mode = 'abs'
+    return spectra, y_label, norm_mode
 
-    # Mask to the displayed frequency window; all window-dependent quantities
-    # (trace-label position, peak labels, sticks) use vis, while normalisation
-    # above already used the full spectrum.
-    in_window = (x >= freq_min) & (x <= freq_max)
-    vis = [s[in_window] for s in spectra]
 
+def build_trace_labels(all_meta, files, args) -> List[str]:
+    """Build the per-trace labels shown in the legend / beside each trace."""
     auto_labels, efield_in_legend = build_legend_labels(all_meta, files)
     if args.labels:
         for i, lbl in enumerate(args.labels):
@@ -672,9 +573,16 @@ def main():
               f"'{trace_labels[0]}' -- the legend cannot distinguish them. "
               "Pass distinct --labels to disambiguate.)")
 
-    # Figure title
-    # --title line1/line2 selects one line of the auto-generated title; it is
-    # not itself a custom title string.
+    return trace_labels
+
+
+def build_plot_title(all_meta, files, args, gamma):
+    """Resolve the figure title and the title-line selector.
+
+    --title 'line1'/'line2' selects one line of the auto-generated title (it is
+    not itself a custom title string); --title '' omits the title entirely; any
+    other --title value is shown as-is.
+    """
     title_line = "both"
     if args.title in ("line1", "line2"):
         title_line = args.title
@@ -728,9 +636,22 @@ def main():
                 title_line2_parts.append("S(ν)")
             plot_title = "Raman Spectra Comparison\n" + " | ".join(title_line2_parts)
 
-    set_style()
-    n = len(files)
+    return plot_title, title_line
 
+
+def compute_layout(args, waterfall_mode, n, freq_min, freq_max, full_min, full_max,
+                   vis) -> Tuple[List[float], float, float, float]:
+    """Compute waterfall baselines/stack extent and the figure size.
+
+    Returns
+    -------
+    baselines : list of float
+        One baseline offset per trace.
+    stack_top : float
+        Vertical extent of the stacked traces.
+    fig_w, fig_h : float
+        Figure size in inches (after any --figsize override).
+    """
     # Waterfall baselines: --offset is the LOWER padding below each trace
     # baseline; the UPPER padding above the baseline is UPPER_OFFSET_RATIO x
     # offset, so --offset 0.5 gives 0.5 below and 1.0 above each baseline.
@@ -756,15 +677,21 @@ def main():
         else:
             raise SystemExit("--figsize takes 1 (square) or 2 (WIDTH HEIGHT) values.")
 
-    fig, ax = plt.subplots(figsize = (fig_w, fig_h))
+    return baselines, stack_top, fig_w, fig_h
 
+
+def draw_waterfall(ax, *, spectra, vis, all_freqs, all_weights, all_irreps,
+                   trace_labels, in_window, x, baselines, freq_min, freq_max,
+                   waterfall_mode, show_labels, y_label, grid, x_lines, y_lines,
+                   n, args) -> None:
+    """Draw the spectra (traces, optional sticks, optional peak labels), the
+    legend, axis labels, grid, and reference lines."""
     colors = pick_colors(n)
 
     for i, (spectrum, freqs, weights, irreps, label, color) in enumerate(
             zip(spectra, all_freqs, all_weights, all_irreps, trace_labels, colors)):
 
         baseline = baselines[i]
-        has_irreps = any(lbl != '' for lbl in irreps)
 
         # In non-waterfall mode the trace label goes into the legend box; in
         # waterfall mode it is drawn inline to the right of each trace.
@@ -785,7 +712,7 @@ def main():
                 va="bottom",
                 ha="left",
                 zorder=5,
-                bbox=dict(facecolor="#cccccc", edgecolor="#cccccc", alpha=0.4, pad=1.0),
+                bbox=dict(facecolor=UWM_GREY, edgecolor=UWM_GOLD, alpha=0.4, pad=1.0),
             )
 
         if args.sticks and freqs.size:
@@ -806,11 +733,6 @@ def main():
             )
             for pk in top_peaks:
                 peak_freq = x[in_window][pk]
-                # if has_irreps and len(freqs) > 0:
-                #     closest_idx = int(np.argmin(np.abs(freqs - peak_freq)))
-                #     irrep = irreps[closest_idx]
-                #     label_text = f"{irrep}\n{peak_freq:.0f}"
-                # else:
                 label_text = f"{peak_freq:.1f}"
                 ax.annotate(
                     label_text,
@@ -828,13 +750,13 @@ def main():
     ax.set_ylabel(y_label)
 
     # Grid visibility (default 'x' preserves the original x-grid-only look).
-    if args.grid == "both":
+    if grid == "both":
         ax.xaxis.grid(True)
         ax.yaxis.grid(True)
-    elif args.grid == "x":
+    elif grid == "x":
         ax.xaxis.grid(True)
         ax.yaxis.grid(False)
-    elif args.grid == "y":
+    elif grid == "y":
         ax.xaxis.grid(False)
         ax.yaxis.grid(True)
     else:  # "none"
@@ -842,14 +764,64 @@ def main():
         ax.yaxis.grid(False)
 
     # Optional vertical reference lines at user-selected x-axis (wavenumber) values.
-    if args.x_line:
-        for xv in args.x_line:
-            ax.axvline(xv, color="UWM_GREY", lw=0.8, ls="--", alpha=0.8, zorder=2)
+    if x_lines:
+        for xv in x_lines:
+            ax.axvline(xv, color=UWM_GREY, lw=0.8, ls="--", alpha=0.8, zorder=2)
 
     # Optional horizontal reference lines at user-selected y-axis values.
-    if args.y_line:
-        for yv in args.y_line:
-            ax.axhline(yv, color="UWM_GREY", lw=0.8, ls="--", alpha=0.8, zorder=2)
+    if y_lines:
+        for yv in y_lines:
+            ax.axhline(yv, color=UWM_GREY, lw=0.8, ls="--", alpha=0.8, zorder=2)
+
+
+def main():
+    args = parse_args()
+
+    waterfall_mode = args.offset > 0
+    if waterfall_mode and not args.normalize and not args.normalize_each:
+        args.normalize_each = True
+        print("  (auto: --normalize-each applied because --offset > 0)")
+
+    show_labels = args.n_labels > 0 and waterfall_mode
+    if args.n_labels > 0 and not waterfall_mode:
+        print("  (note: peak labels are shown only in --offset waterfall mode)")
+
+    files = resolve_input_files(args)
+
+    mode_str = "Raw Activity S(nu)" if args.raw_activity else f"Stokes Intensity (T={args.temperature:g} K, {args.laser_wl:g} nm)"
+    print(f"Comparing {len(files)} spectra [{mode_str}]:")
+    for f in files:
+        print(f"  {Path(f).name}")
+
+    all_freqs, all_acts, all_irreps, all_meta = load_all(files)
+
+    (spectra, x, in_window, full_min, full_max,
+     freq_min, freq_max, all_weights) = build_all_spectra(all_freqs, all_acts, args)
+
+    spectra, y_label, norm_mode = normalize_spectra(spectra, args)
+
+    # Masked (zoomed) views drive the window-dependent quantities below.
+    vis = [s[in_window] for s in spectra]
+
+    trace_labels = build_trace_labels(all_meta, files, args)
+    gamma = args.gamma * THZCM1
+    plot_title, title_line = build_plot_title(all_meta, files, args, gamma)
+
+    set_style(compact=True)
+    n = len(files)
+    baselines, _stack_top, fig_w, fig_h = compute_layout(
+        args, waterfall_mode, n, freq_min, freq_max, full_min, full_max, vis)
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    draw_waterfall(
+        ax,
+        spectra=spectra, vis=vis, all_freqs=all_freqs, all_weights=all_weights,
+        all_irreps=all_irreps, trace_labels=trace_labels, in_window=in_window,
+        x=x, baselines=baselines, freq_min=freq_min, freq_max=freq_max,
+        waterfall_mode=waterfall_mode, show_labels=show_labels, y_label=y_label,
+        grid=args.grid, x_lines=args.x_line, y_lines=args.y_line, n=n, args=args,
+    )
 
     # --title line1/line2 only affects the auto-generated title; a custom
     # --title is shown as-is, and --title "" still omits the title entirely.
@@ -862,6 +834,7 @@ def main():
     fig.savefig(out_png, bbox_inches="tight")
     plt.close(fig)
     print(f"\nSaved: {out_png}")
+
 
 
 if __name__ == '__main__':

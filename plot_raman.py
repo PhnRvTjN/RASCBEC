@@ -44,7 +44,7 @@ Key Physical Relevance (e.g., LLTO vs. Na3PS4):
    low-frequency intensity by 4x to 7x relative to high-frequency Ti-O stretches
    (500-600 cm^-1).
 3. By default, this updated module evaluates the full temperature-dependent Stokes
-   scattered intensity :math:`I(\\nu, T)` at T = 300 K using a 632.8 nm laser line,
+   scattered intensity :math:`I(\\nu, T)` at T = 350 K using a 632.8 nm laser line,
    accurately reproducing laboratory intensity distributions. The unweighted raw
    Raman activity :math:`S(\\nu)` can still be plotted using ``--raw-activity``.
 
@@ -76,48 +76,57 @@ from scipy.signal import find_peaks
 # Physical Constants and Plot Defaults
 # ---------------------------------------------------------------------------
 
-STICK_A = 0.6                 # stick alpha (pre-broadened stick intensity)
-STICK_LW = 0.8                # stick linewidth
 THZCM1 = 33.356409519815204   # 1 THz in cm^-1 (c = 2.99792458e10 cm/s)
 KB_CM1 = 0.69503476           # Boltzmann constant kB in cm^-1 / K
-DEFAULT_TEMP = 350.0          # Default sample temperature in Kelvin
 DEFAULT_LASER_WL = 632.8      # Default excitation laser wavelength in nm
+DEFAULT_TEMP = 350.0          # Default sample temperature in Kelvin
+STICK_A = 0.6                 # stick alpha (pre-broadened stick intensity)
+STICK_LW = 0.8                # stick linewidth
 ASPECT_RATIO = 1.618          # Golden ratio for figure width/height when auto-scaling
 UWM_GOLD = "#ffbd00"        # Underwater Materials gold for titles / labels
-UWM_GREY = "#666666"        # Underwater Materials grey for titles / labels
+UWM_GREY = "#cccccc"        # Underwater Materials grey for titles / labels
 
 
 # ---------------------------------------------------------------------------
 # Style (publication-ready rcParams; mirrors plot_raman_waterfall.py)
 # ---------------------------------------------------------------------------
 
-def set_style() -> None:
-    """Publication-ready matplotlib rcParams (same as plot_raman_waterfall)."""
+def set_style(compact: bool = False) -> None:
+    """
+    Publication-ready matplotlib rcParams (same as plot_raman_waterfall).
+
+    ``compact`` toggles the smaller typography used by multi-trace figures
+    (``compare_raman.py`` waterfall); the single-trace default is larger.
+    """
+    if compact:
+        base, title, tick, legend = 10, 12, 8, 8
+    else:
+        base, title, tick, legend = 12, 16, 10, 10
     plt.rcParams.update({
         "figure.dpi": 200,
         "savefig.dpi": 600,
-        "font.size": 12,
-        "axes.titlesize": 16,
-        "axes.labelsize": 12,
+        "font.size": base,
+        "axes.titlesize": title,
+        "axes.labelsize": base,
         "axes.titleweight": "bold",
         "axes.labelweight": "bold",
         "axes.linewidth": 1.0,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
+        "xtick.labelsize": tick,
+        "ytick.labelsize": tick,
         "xtick.direction": "in",
         "ytick.direction": "in",
         "xtick.major.size": 4,
         "ytick.major.size": 4,
         "xtick.minor.size": 2,
         "ytick.minor.size": 2,
-        "legend.fontsize": 10,
+        "legend.fontsize": legend,
         "legend.frameon": True,
         "legend.framealpha": 0.6,
-        "legend.facecolor": "#cccccc",
-        "legend.edgecolor": "#cccccc",
+        "legend.facecolor": UWM_GREY,
+        "legend.edgecolor": UWM_GOLD,
         "grid.alpha": 0.8,
         "grid.linestyle": "--",
-        "grid.color": "#cccccc",
+        "grid.color": UWM_GREY,
         "grid.linewidth": 0.8,
         "axes.grid": False,
         "axes.spines.top": True,
@@ -215,9 +224,9 @@ def activity_to_stokes_intensity(
     activities : np.ndarray
         Calculated RASCBEC Raman activities (isotropic powder averaged: 45*a^2 + 7*g^2).
     temperature : float, optional
-        Sample temperature in Kelvin (default: 280.0 K).
+        Sample temperature in Kelvin (default: 350.0 K, see ``DEFAULT_TEMP``).
     laser_wl_nm : float, optional
-        Excitation laser wavelength in nm (default: 632.8 nm).
+        Excitation laser wavelength in nm (default: 632.8 nm, see ``DEFAULT_LASER_WL``).
     freq_cutoff_cm1 : float, optional
         Minimum frequency threshold to avoid division by zero (default: 1.0 cm^-1).
 
@@ -249,13 +258,18 @@ def activity_to_stokes_intensity(
     return intensities
 
 
-def _load_raman_csv(dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+def read_raman_csv(dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray, List[str], Dict]:
     """
-    Parse a RASCBEC CSV file.
+    Parse a RASCBEC CSV file: mode data AND header metadata in one pass.
 
-    Handles both the old 3-column format (Mode, Freq_cm-1, Activity) and the
-    new 4-column format (Mode, Freq_cm-1, Activity, Irrep). Comment lines
-    beginning with '#' are skipped.
+    Handles the legacy 3-column format (Mode, Freq_cm-1, Activity) and the
+    4-column format (Mode, Freq_cm-1, Activity, Irrep). Comment lines
+    beginning with '#' carry optional metadata written by RASCBEC_phonopy.py /
+    RASCBEC_VASP.py (Formula, Dopants, File_Label, E_field) and are parsed
+    alongside the data.
+
+    This is the single shared CSV reader used by both ``plot_raman`` and
+    ``compare_raman``.
 
     Parameters
     ----------
@@ -270,64 +284,39 @@ def _load_raman_csv(dat_file: Union[str, Path]) -> Tuple[np.ndarray, np.ndarray,
         Mode Raman activities from RASCBEC.
     irrep_labels : List[str]
         Mode irreducible representations (empty strings if not present).
+    meta : dict
+        Metadata with keys ``'formula'``, ``'dopants'``, ``'file_label'``
+        (str) and ``'e_field'`` (float or None). Absent values are ``''``
+        (or ``None`` for ``e_field``).
     """
+    meta: Dict = {'formula': '', 'dopants': '', 'file_label': '', 'e_field': None}
     freqs, acts, irreps = [], [], []
     with open(dat_file, 'r', encoding='utf-8') as fh:
         for line in fh:
             s = line.strip()
-            if s.startswith('#') or not s:
+            if not s:
+                continue
+            if s.startswith('#'):
+                s = s[1:].strip()
+                if s.startswith('Formula:'):
+                    meta['formula'] = s.split(':', 1)[1].strip()
+                elif s.startswith('Dopants:'):
+                    meta['dopants'] = s.split(':', 1)[1].strip()
+                elif s.startswith('File_Label:'):
+                    meta['file_label'] = s.split(':', 1)[1].strip()
+                elif s.startswith('E_field:'):
+                    val = s.split(':', 1)[1].strip()
+                    try:
+                        meta['e_field'] = float(val)
+                    except ValueError:
+                        meta['e_field'] = val
                 continue
             parts = s.split(',')
             freqs.append(float(parts[1]))
             acts.append(float(parts[2]))
             irreps.append(parts[3].strip() if len(parts) > 3 else '')
-    return np.array(freqs, dtype=float), np.array(acts, dtype=float), irreps
-
-
-def _read_csv_metadata(dat_file: Union[str, Path]) -> Dict[str, Optional[Union[str, float]]]:
-    """
-    Read metadata from commented CSV header lines written by RASCBEC_phonopy.py.
-
-    Recognized keys: Formula, Dopants, File_Label, E_field.
-
-    Parameters
-    ----------
-    dat_file : str or Path
-        Path to the CSV file.
-
-    Returns
-    -------
-    dict
-        Metadata dictionary with keys 'formula', 'dopants', 'file_label', 'E_field'.
-    """
-    meta: Dict[str, Optional[Union[str, float]]] = {
-        'formula': None,
-        'dopants': '',
-        'file_label': '',
-        'E_field': None,
-    }
-
-    with open(dat_file, 'r', encoding='utf-8') as fh:
-        for line in fh:
-            s = line.strip()
-            if not s.startswith('#'):
-                break
-
-            s = s[1:].strip()
-            if s.startswith('Formula:'):
-                meta['formula'] = s.split(':', 1)[1].strip()
-            elif s.startswith('Dopants:'):
-                meta['dopants'] = s.split(':', 1)[1].strip()
-            elif s.startswith('File_Label:'):
-                meta['file_label'] = s.split(':', 1)[1].strip()
-            elif s.startswith('E_field:'):
-                val = s.split(':', 1)[1].strip()
-                try:
-                    meta['E_field'] = float(val)
-                except ValueError:
-                    meta['E_field'] = val
-
-    return meta
+    return (np.array(freqs, dtype=float), np.array(acts, dtype=float),
+            irreps, meta)
 
 
 # ---------------------------------------------------------------------------
@@ -628,14 +617,14 @@ def _build_plot_title_from_csv(
     str
         Formatted plot title string.
     """
-    meta = _read_csv_metadata(dat_file)
+    _, _, _, meta = read_raman_csv(dat_file)
     formula = meta['formula']
     if not formula:
         return Path(dat_file).stem
 
     return build_raman_title(
         chem={"formula": formula, "dopants": meta['dopants']},
-        E=meta['E_field'],
+        E=meta['e_field'],
         gamma=gamma,
         temperature=temperature,
         raw_activity=raw_activity,
@@ -713,23 +702,30 @@ def select_labeled_peaks(
 
 
 def plot_raman_spectrum(
+    # --- input / output ---
     dat_file: Union[str, Path],
     out_png: Optional[Union[str, Path]] = None,
-    gamma: float = 8.3391,
-    freq_min: float = 0.0,
-    freq_max: Optional[float] = None,
-    sticks: bool = True,
-    n_labels: int = 10,
-    min_label_sep: float = 10.0,
-    prominence: float = 0.01,
-    title: Optional[str] = None,
+    # --- physical model (what is plotted and under what conditions) ---
     raw_activity: bool = False,
     temperature: float = DEFAULT_TEMP,
     laser_wl: float = DEFAULT_LASER_WL,
+    gamma: float = 8.3391,
+    # --- displayed frequency window (cm^-1) ---
+    freq_min: float = 0.0,
+    freq_max: Optional[float] = None,
+    # --- stick spectrum ---
+    sticks: bool = True,
+    # --- peak labels ---
+    n_labels: int = 10,
+    min_label_sep: float = 10.0,
+    prominence: float = 0.01,
+    # --- title ---
+    title: Optional[str] = None,
+    title_line: str = "both",
+    # --- decorations (grid & reference lines) ---
     grid: str = "both",
     x_lines: Optional[List[float]] = None,
     y_lines: Optional[List[float]] = None,
-    title_line: str = "both",
 ) -> None:
     """
     Read a RASCBEC CSV output, apply thermal/Stokes conversion and Lorentzian broadening, and save a plot.
@@ -747,31 +743,37 @@ def plot_raman_spectrum(
         Input CSV file path (required).
     out_png : str or Path, optional
         Output PNG path (default: dat_file stem + .png).
+    raw_activity : bool, optional
+        If True, plot raw Raman activity S(nu) instead of Stokes intensity
+        I(nu, T) (default: False).
+    temperature : float, optional
+        Sample temperature in Kelvin for the Bose-Einstein factor
+        (default: 350.0 K, see ``DEFAULT_TEMP``).
+    laser_wl : float, optional
+        Laser excitation wavelength in nm for the (nu_L - nu)^4 factor
+        (default: 632.8 nm, see ``DEFAULT_LASER_WL``).
     gamma : float, optional
         Lorentzian FWHM in cm^-1 (default: 8.3391 cm^-1, equivalent to 0.25 THz).
     freq_min : float, optional
         Lower x-axis limit in cm^-1 (default: 0.0).
     freq_max : float, optional
-        Upper x-axis limit in cm^-1 (default: auto, max mode + 50 cm^-1).
+        Upper x-axis limit in cm^-1 (default: auto, max mode + 50 cm^-1, rounded to the nearest 100 cm^-1).
     sticks : bool, optional
-        Whether to overlay stick spectrum (default: True).
+        Whether to overlay the stick spectrum (default: True).
     n_labels : int, optional
-        Number of peak labels to annotate (default: 10).
+        Number of peak labels to annotate (default: 10; 0 to disable).
     min_label_sep : float, optional
         Minimum cm^-1 separation between labelled peaks; a candidate closer
         than this to a stronger labelled peak is merged into it (a split
-        Lorentzian shoulder, default: 10; set 0 to disable).
+        Lorentzian shoulder; default: 10; set 0 to disable).
     prominence : float, optional
         Prominence threshold as a fraction of the trace's peak-to-baseline span
         used to detect labellable peaks (default: 0.01 = 1%).
     title : str, optional
         Custom plot title (default: auto-generated from CSV metadata).
-    raw_activity : bool, optional
-        If True, plot raw Raman activity S(nu) instead of Stokes intensity I(nu, T).
-    temperature : float, optional
-        Sample temperature in Kelvin for Bose-Einstein factor (default: 350.0 K).
-    laser_wl : float, optional
-        Laser excitation wavelength in nm for (nu_L - nu)^4 factor (default: 532.0 nm).
+    title_line : str, optional
+        Which auto-generated title line to show: 'both' (default), 'line1', or
+        'line2'. Custom ``title`` values are displayed as-is regardless.
     grid : str, optional
         Grid visibility: 'both' (default, x and y grids), 'x' (x grid only),
         'y' (y grid only), or 'none' (no grid).
@@ -781,9 +783,6 @@ def plot_raman_spectrum(
     y_lines : list of float, optional
         If given, draw a horizontal reference line at each of these y-axis
         values (e.g. ``[1.0]`` to mark the normalised peak height).
-    title_line : str, optional
-        Which auto-generated title line to show: 'both' (default), 'line1', or
-        'line2'. Custom ``title`` values are displayed as-is regardless.
     """
     if gamma <= 0:
         raise ValueError(f"gamma must be positive; got {gamma}")
@@ -791,14 +790,14 @@ def plot_raman_spectrum(
     set_style()
     out_png = out_png or Path(dat_file).with_suffix('.png').name
 
-    freqs_cm1, activities, irrep_labels = _load_raman_csv(dat_file)
+    freqs_cm1, activities, irrep_labels, _meta = read_raman_csv(dat_file)
     has_irreps = any(lbl != '' for lbl in irrep_labels)
 
     if freqs_cm1.size == 0:
         raise ValueError(f"No Raman modes found in {dat_file}")
 
     if freq_max is None:
-        freq_max = float(freqs_cm1.max() + 50.0)
+        freq_max = round(float(freqs_cm1.max() + 50.0)/100) * 100
     if freq_max <= freq_min:
         raise ValueError(
             f"freq_max must exceed freq_min; got {freq_min} and {freq_max}"
@@ -817,7 +816,7 @@ def plot_raman_spectrum(
         )
         spectrum_label = "broadened I(ν)"
 
-    x = np.linspace(freq_min, freq_max, 5000)
+    x = np.linspace(freq_min, freq_max, 10000)
     spectrum = np.zeros_like(x)
 
     # Sum every mode on the evaluation grid. Lorentzian tails contribute even
@@ -891,7 +890,7 @@ def plot_raman_spectrum(
     ax.set_xlim(freq_min, freq_max)
     ax.set_ylim(0, y_top)
     ax.set_xlabel(r"Wavenumber (cm$^{-1}$)")
-    ax.set_ylabel("Intensity (arb. units)")
+    ax.set_ylabel("Intensity (simulated, arb. units)")
 
     # Grid visibility (default 'both' preserves the original behaviour).
     if grid == "both":
@@ -934,30 +933,40 @@ def plot_raman_spectrum(
     print(f"Saved: {out_png}")
 
 
-if __name__ == '__main__':
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
+
+def parse_args():
     p = argparse.ArgumentParser(
         description='Plot Raman spectrum from RASCBEC CSV output with Stokes thermal conversion.'
     )
+    # --- input / output ---
     p.add_argument('--dat', default=None,
                    help='Input CSV file (e.g. Li0.31La0.56TiO3_E0.02.csv). '
                         'If omitted, the single CSV in the current directory is used.')
     p.add_argument('--out', default=None,
                    help='Output PNG filename (default: dat stem + .png)')
-    p.add_argument('--gamma', type=float, default=0.25,
-                   help='Lorentzian FWHM in THz (default: 0.25 THz); converted '
-                        'to cm^-1 internally via THZCM1.')
-    p.add_argument('--freq-min', type=float, default=0.0,
-                   help='Lower x-axis limit in cm-1 (default: 0)')
-    p.add_argument('--freq-max', type=float, default=None,
-                   help='Upper x-axis limit in cm-1 (default: auto)')
+    # --- physical model (what is plotted and under what conditions) ---
     p.add_argument('--temperature', type=float, default=DEFAULT_TEMP,
                    help='Sample temperature in K for Bose-Einstein factor (default: 350.0 K)')
     p.add_argument('--laser-wl', type=float, default=DEFAULT_LASER_WL,
                    help='Excitation laser wavelength in nm (default: 632.8 nm)')
     p.add_argument('--raw-activity', action='store_true',
                    help='Plot raw Raman activity S(nu) without 1/nu or thermal Bose factors')
+    p.add_argument('--gamma', type=float, default=0.25,
+                   help='Lorentzian FWHM in THz (default: 0.25 THz); converted '
+                        'to cm^-1 internally via THZCM1.')
+    # --- displayed frequency window (cm^-1) ---
+    p.add_argument('--freq-min', type=float, default=0.0,
+                   help='Lower x-axis limit in cm-1 (default: 0)')
+    p.add_argument('--freq-max', type=float, default=None,
+                   help='Upper x-axis limit in cm-1 (default: auto = highest '
+                        'mode + 50 cm-1, rounded to the nearest 100 cm-1)')
+    # --- stick spectrum ---
     p.add_argument('--no-sticks', action='store_true',
                    help='Hide stick spectrum')
+    # --- peak labels ---
     p.add_argument('--n-labels', type=int, default=10,
                    help='Number of peak labels to annotate (default: 10)')
     p.add_argument('--min-label-sep', type=float, default=10.0,
@@ -967,10 +976,12 @@ if __name__ == '__main__':
     p.add_argument('--prominence', type=float, default=0.01,
                    help='Prominence threshold (fraction of peak-to-baseline '
                         'span) used to detect labellable peaks (default: 0.01)')
+    # --- title ---
     p.add_argument('--title', type=str, default=None,
                    help='Custom plot title (default: auto-generated). Pass '
                         "'line1' or 'line2' to show only the formula line or "
                         "only the parameters line of the auto-generated title.")
+    # --- decorations (grid & reference lines) ---
     p.add_argument('--grid', choices=['both', 'x', 'y', 'none'], default='both',
                    help='Grid visibility: both (default), x, y, or none')
     p.add_argument('--x-line', type=float, nargs='+', default=None, metavar='X',
@@ -979,8 +990,15 @@ if __name__ == '__main__':
     p.add_argument('--y-line', type=float, nargs='+', default=None, metavar='Y',
                    help='Draw a horizontal reference line at each of these '
                         'y-axis values (e.g. --y-line 1.0 0.5)')
+    return p.parse_args()
 
-    args = p.parse_args()
+
+# ---------------------------------------------------------------------------
+# Main orchestration
+# ---------------------------------------------------------------------------
+
+def main():
+    args = parse_args()
 
     dat_file = args.dat if args.dat is not None else str(resolve_default_csv())
 
@@ -990,21 +1008,31 @@ if __name__ == '__main__':
         title, title_line = None, title
 
     plot_raman_spectrum(
+        # input / output
         dat_file=dat_file,
         out_png=args.out,
-        gamma=args.gamma * THZCM1,
-        freq_min=args.freq_min,
-        freq_max=args.freq_max,
-        sticks=not args.no_sticks,
-        n_labels=args.n_labels,
-        min_label_sep=args.min_label_sep,
-        prominence=args.prominence,
-        title=title,
+        # physical model
         raw_activity=args.raw_activity,
         temperature=args.temperature,
         laser_wl=args.laser_wl,
+        gamma=args.gamma * THZCM1,
+        # frequency window
+        freq_min=args.freq_min,
+        freq_max=args.freq_max,
+        # sticks
+        sticks=not args.no_sticks,
+        # peak labels
+        n_labels=args.n_labels,
+        min_label_sep=args.min_label_sep,
+        prominence=args.prominence,
+        # title
+        title=title,
+        title_line=title_line,
+        # decorations
         grid=args.grid,
         x_lines=args.x_line,
         y_lines=args.y_line,
-        title_line=title_line,
     )
+
+if __name__ == '__main__':
+    main()

@@ -114,6 +114,8 @@ from plot_raman import (
     plot_raman_spectrum,
     build_raman_title,
     DOPANT_SUBSTITUTIONS,
+    THZCM1,
+    KB_CM1,
     DEFAULT_TEMP,
     DEFAULT_LASER_WL,
 )
@@ -122,7 +124,6 @@ from plot_raman import (
 # Physical constants
 # ---------------------------------------------------------------------------
 
-THZCM1 = 33.3564095198       # THz -> cm-1
 THZMEV  = 4.13566553853599   # THz -> meV
 EPS0    = 55.2635e-4         # e0 in e^2 / (eV*Å)
 KB_T    = 8.617333e-2 * 298  # k_B T at 298 K, meV
