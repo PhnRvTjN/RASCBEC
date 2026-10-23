@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
+r"""
 Standalone Raman spectrum plotter for RASCBEC output.
 
 Also importable:
@@ -46,13 +46,13 @@ Key Physical Relevance (e.g., LLTO vs. Na3PS4):
 3. By default, this updated module evaluates the full temperature-dependent Stokes
    scattered intensity :math:`I(\\nu, T)` at T = 350 K using a 632.8 nm laser line,
    accurately reproducing laboratory intensity distributions. The unweighted raw
-   Raman activity :math:`S(\\nu)` can still be plotted using ``--raw-activity``.
+   Raman activity :math:`S(\\nu)` can still be plotted using ``--raw-act``.
 
 Usage:
     python plot_raman.py                          # auto-uses the only CSV in cwd (T=350K, 632.8nm)
     python plot_raman.py --dat LLTO_E0.02.csv
-    python plot_raman.py --dat LLTO_E0.02.csv --temperature 280 --laser-wl 532
-    python plot_raman.py --dat LLTO_E0.02.csv --raw-activity     # legacy S(nu) mode
+    python plot_raman.py --dat LLTO_E0.02.csv --temp 280 --laser-wl 532
+    python plot_raman.py --dat LLTO_E0.02.csv --raw-act     # legacy S(nu) mode
     python plot_raman.py --dat LLTO_E0.02.csv --gamma 0.25
     python plot_raman.py --dat LLTO_E0.02.csv --freq-min 50 --freq-max 900
     python plot_raman.py --dat LLTO_E0.02.csv --no-sticks --n-labels 10
@@ -82,6 +82,7 @@ DEFAULT_LASER_WL = 632.8      # Default excitation laser wavelength in nm
 DEFAULT_TEMP = 350.0          # Default sample temperature in Kelvin
 STICK_A = 0.6                 # stick alpha (pre-broadened stick intensity)
 STICK_LW = 0.8                # stick linewidth
+STICK_MAX_FRAC = 0.6          # fraction of max intensity the tallest stick reaches
 ASPECT_RATIO = 1.618          # Golden ratio for figure width/height when auto-scaling
 UWM_GOLD = "#ffbd00"        # Underwater Materials gold for titles / labels
 UWM_GREY = "#cccccc"        # Underwater Materials grey for titles / labels
@@ -198,7 +199,7 @@ def lorentzian(x: np.ndarray, x0: float, A: float, gamma: float) -> np.ndarray:
 def activity_to_stokes_intensity(
     freqs_cm1: np.ndarray,
     activities: np.ndarray,
-    temperature: float = DEFAULT_TEMP,
+    temp: float = DEFAULT_TEMP,
     laser_wl_nm: float = DEFAULT_LASER_WL,
     freq_cutoff_cm1: float = 1.0,
 ) -> np.ndarray:
@@ -223,7 +224,7 @@ def activity_to_stokes_intensity(
         Phonon frequencies in cm^-1.
     activities : np.ndarray
         Calculated RASCBEC Raman activities (isotropic powder averaged: 45*a^2 + 7*g^2).
-    temperature : float, optional
+    temp : float, optional
         Sample temperature in Kelvin (default: 350.0 K, see ``DEFAULT_TEMP``).
     laser_wl_nm : float, optional
         Excitation laser wavelength in nm (default: 632.8 nm, see ``DEFAULT_LASER_WL``).
@@ -243,7 +244,7 @@ def activity_to_stokes_intensity(
             continue
 
         # Bose-Einstein occupation factor for Stokes scattering: n(nu, T) + 1
-        x = f / (KB_CM1 * temperature)
+        x = f / (KB_CM1 * temp)
         if x > 700.0:
             bose = 1.0
         else:
@@ -504,8 +505,8 @@ def build_raman_title(
     chem: dict,
     E: Optional[float],
     gamma: float,
-    temperature: float,
-    raw_activity: bool = False,
+    temp: float,
+    raw_act: bool = False,
     suffix: str = "Raman",
     show_legend: bool = True,
 ) -> str:
@@ -514,7 +515,7 @@ def build_raman_title(
 
     Line 1: bold doped formula (mathtext) + ``suffix`` + dopant-fraction legend
             (e.g. ``Na₃₋₂ₓ₋ᵧCaₓPS₄₋ᵧClᵧ Raman | x=0.125 y=0.0625``).
-    Line 2: run parameters — E, FWHM, T (or S(ν) when ``raw_activity=True``).
+    Line 2: run parameters — E, FWHM, T (or S(ν) when ``raw_act=True``).
 
     Parameters
     ----------
@@ -525,9 +526,9 @@ def build_raman_title(
         E-field magnitude in eV/Å.  Omitted from title when None.
     gamma        : float
         Lorentzian FWHM in cm^-1.
-    temperature  : float
+    temp  : float
         Sample temperature in K.
-    raw_activity : bool, optional
+    raw_act : bool, optional
         If True, show ``S(ν)`` instead of temperature in line 2.
     suffix       : str, optional
         Text following the formula on line 1 (default ``"Raman"``; use
@@ -582,10 +583,10 @@ def build_raman_title(
     if E is not None:
         line2_parts.append(f"E = {E:g} eV/Å")
     line2_parts.append(f"FWHM = {gamma:.2f} cm$^{{-1}}$")
-    if raw_activity:
+    if raw_act:
         line2_parts.append("S(ν)")
     else:
-        line2_parts.append(f"T = {temperature:g} K")
+        line2_parts.append(f"T = {temp:g} K")
     line2 = "  |  ".join(line2_parts)
 
     return f"{line1}\n{line2}"
@@ -594,8 +595,8 @@ def build_raman_title(
 def _build_plot_title_from_csv(
     dat_file: Union[str, Path],
     gamma: float,
-    raw_activity: bool = False,
-    temperature: float = DEFAULT_TEMP,
+    raw_act: bool = False,
+    temp: float = DEFAULT_TEMP,
 ) -> str:
     """
     Rebuild the informative plot title from CSV metadata and physical parameters.
@@ -607,9 +608,9 @@ def _build_plot_title_from_csv(
         Path to the CSV file.
     gamma : float
         Lorentzian FWHM in cm^-1.
-    raw_activity : bool, optional
+    raw_act : bool, optional
         Whether raw activity S(nu) is being plotted.
-    temperature : float, optional
+    temp : float, optional
         Sample temperature in Kelvin.
 
     Returns
@@ -626,8 +627,8 @@ def _build_plot_title_from_csv(
         chem={"formula": formula, "dopants": meta['dopants']},
         E=meta['e_field'],
         gamma=gamma,
-        temperature=temperature,
-        raw_activity=raw_activity,
+        temp=temp,
+        raw_act=raw_act,
     )
 
 
@@ -706,8 +707,8 @@ def plot_raman_spectrum(
     dat_file: Union[str, Path],
     out_png: Optional[Union[str, Path]] = None,
     # --- physical model (what is plotted and under what conditions) ---
-    raw_activity: bool = False,
-    temperature: float = DEFAULT_TEMP,
+    raw_act: bool = False,
+    temp: float = DEFAULT_TEMP,
     laser_wl: float = DEFAULT_LASER_WL,
     gamma: float = 8.3391,
     # --- displayed frequency window (cm^-1) ---
@@ -734,7 +735,7 @@ def plot_raman_spectrum(
     :math:`I(\\nu, T) \\propto \\frac{(\\nu_L - \\nu)^4}{\\nu} [n(\\nu, T) + 1] S(\\nu)`.
     This correctly restores the intense low-frequency bands (< 300 cm^-1) observed in
     experimental measurements of perovskite solid electrolytes like LLTO. If
-    ``raw_activity=True`` is passed, it reproduces the unweighted Raman activity
+    ``raw_act=True`` is passed, it reproduces the unweighted Raman activity
     :math:`S(\\nu)`.
 
     Parameters
@@ -743,10 +744,10 @@ def plot_raman_spectrum(
         Input CSV file path (required).
     out_png : str or Path, optional
         Output PNG path (default: dat_file stem + .png).
-    raw_activity : bool, optional
+    raw_act : bool, optional
         If True, plot raw Raman activity S(nu) instead of Stokes intensity
         I(nu, T) (default: False).
-    temperature : float, optional
+    temp : float, optional
         Sample temperature in Kelvin for the Bose-Einstein factor
         (default: 350.0 K, see ``DEFAULT_TEMP``).
     laser_wl : float, optional
@@ -757,7 +758,7 @@ def plot_raman_spectrum(
     freq_min : float, optional
         Lower x-axis limit in cm^-1 (default: 0.0).
     freq_max : float, optional
-        Upper x-axis limit in cm^-1 (default: auto, max mode + 50 cm^-1, rounded to the nearest 100 cm^-1).
+        Upper x-axis limit in cm^-1 (default: auto, max mode rounded up to the nearest 50 cm^-1).
     sticks : bool, optional
         Whether to overlay the stick spectrum (default: True).
     n_labels : int, optional
@@ -797,26 +798,27 @@ def plot_raman_spectrum(
         raise ValueError(f"No Raman modes found in {dat_file}")
 
     if freq_max is None:
-        freq_max = round(float(freqs_cm1.max() + 50.0)/100) * 100
-    if freq_max <= freq_min:
+        freq_max = float(np.ceil(float(freqs_cm1.max())/50) * 50)
+    elif freq_max <= freq_min:
         raise ValueError(
             f"freq_max must exceed freq_min; got {freq_min} and {freq_max}"
         )
+    assert freq_max is not None
 
     # Convert quantum activities to detector intensities unless raw activity requested
-    if raw_activity:
+    if raw_act:
         mode_weights = np.copy(activities)
         spectrum_label = "broadened S(ν)"
     else:
         mode_weights = activity_to_stokes_intensity(
             freqs_cm1,
             activities,
-            temperature=temperature,
+            temp=temp,
             laser_wl_nm=laser_wl,
         )
         spectrum_label = "broadened I(ν)"
 
-    x = np.linspace(freq_min, freq_max, 10000)
+    x = np.linspace(float(freq_min), float(freq_max), 10000)
     spectrum = np.zeros_like(x)
 
     # Sum every mode on the evaluation grid. Lorentzian tails contribute even
@@ -841,7 +843,7 @@ def plot_raman_spectrum(
     # Calculated sticks
     if sticks and freqs_cm1.size:
         max_weight = mode_weights.max()
-        stick_scale = 0.6 / max_weight if max_weight > 0 else 1.0
+        stick_scale = STICK_MAX_FRAC / max_weight if max_weight > 0 else 1.0
         for f, w in zip(freqs_cm1, mode_weights):
             if w > 0 and freq_min <= f <= freq_max:
                 ax.vlines(
@@ -920,7 +922,7 @@ def plot_raman_spectrum(
         plot_title = title
     else:
         plot_title = _build_plot_title_from_csv(
-            dat_file, gamma, raw_activity=raw_activity, temperature=temperature
+            dat_file, gamma, raw_act=raw_act, temp=temp
         )
         # --title line1/line2 selects one line of the auto-generated title; a
         # custom --title is shown as-is.
@@ -948,11 +950,11 @@ def parse_args():
     p.add_argument('--out', default=None,
                    help='Output PNG filename (default: dat stem + .png)')
     # --- physical model (what is plotted and under what conditions) ---
-    p.add_argument('--temperature', type=float, default=DEFAULT_TEMP,
+    p.add_argument('--temp', type=float, default=DEFAULT_TEMP,
                    help='Sample temperature in K for Bose-Einstein factor (default: 350.0 K)')
     p.add_argument('--laser-wl', type=float, default=DEFAULT_LASER_WL,
                    help='Excitation laser wavelength in nm (default: 632.8 nm)')
-    p.add_argument('--raw-activity', action='store_true',
+    p.add_argument('--raw-act', action='store_true',
                    help='Plot raw Raman activity S(nu) without 1/nu or thermal Bose factors')
     p.add_argument('--gamma', type=float, default=0.25,
                    help='Lorentzian FWHM in THz (default: 0.25 THz); converted '
@@ -962,7 +964,7 @@ def parse_args():
                    help='Lower x-axis limit in cm-1 (default: 0)')
     p.add_argument('--freq-max', type=float, default=None,
                    help='Upper x-axis limit in cm-1 (default: auto = highest '
-                        'mode + 50 cm-1, rounded to the nearest 100 cm-1)')
+                        'mode rounded up to the nearest 50 cm-1)')
     # --- stick spectrum ---
     p.add_argument('--no-sticks', action='store_true',
                    help='Hide stick spectrum')
@@ -1012,8 +1014,8 @@ def main():
         dat_file=dat_file,
         out_png=args.out,
         # physical model
-        raw_activity=args.raw_activity,
-        temperature=args.temperature,
+        raw_act=args.raw_act,
+        temp=args.temp,
         laser_wl=args.laser_wl,
         gamma=args.gamma * THZCM1,
         # frequency window

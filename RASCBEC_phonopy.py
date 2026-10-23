@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""
+r"""
 Title: Calculation of Raman Activities from VASP and Phonopy Output Files
 
 Authors: Rui Zhang (original);
@@ -158,7 +158,7 @@ def parse_args():
     p.add_argument('--gamma', type=float, default=0.25,
                    help='Lorentzian FWHM in THz for spectral broadening (default: 0.25);'
                         'converted to cm-1 internally via THZCM1.')
-    p.add_argument('--temperature', type=float, default=DEFAULT_TEMP,
+    p.add_argument('--temp', type=float, default=DEFAULT_TEMP,
                    help='Sample temperature in K for Bose-Einstein factor (default: 300.0 K)')
     p.add_argument('--laser-wl', type=float, default=DEFAULT_LASER_WL,
                    help='Excitation laser wavelength in nm (default: 632.8 nm)')
@@ -1059,18 +1059,18 @@ def main():
 
     # --- 9. Plot ---
     if not args.no_plot:
-        title = build_raman_title(chem, E, args.gamma * THZCM1, args.temperature)
+        title = build_raman_title(chem, E, args.gamma * THZCM1, args.temp)
         plot_raman_spectrum(
-            dat_file    = out_csv,
-            out_png     = out_png,
-            gamma       = args.gamma * THZCM1,
-            freq_min    = args.freq_min,
-            freq_max    = args.freq_max,
-            sticks      = not args.no_sticks,
-            n_labels    = args.n_labels,
-            title       = title,
-            temperature = args.temperature,
-            laser_wl    = args.laser_wl,
+            dat_file = out_csv,
+            out_png  = out_png,
+            gamma    = args.gamma * THZCM1,
+            freq_min = args.freq_min,
+            freq_max = args.freq_max,
+            sticks   = not args.no_sticks,
+            n_labels = args.n_labels,
+            title    = title,
+            temp     = args.temp,
+            laser_wl = args.laser_wl,
         )
         print(f"Written : {out_png}")
 
