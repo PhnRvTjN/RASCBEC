@@ -82,7 +82,7 @@ DEFAULT_LASER_WL = 632.8      # Default excitation laser wavelength in nm
 DEFAULT_TEMP = 350.0          # Default sample temperature in Kelvin
 STICK_A = 0.6                 # stick alpha (pre-broadened stick intensity)
 STICK_LW = 0.8                # stick linewidth
-STICK_MAX_FRAC = 0.6          # fraction of max intensity the tallest stick reaches
+STICK_MAX_FRAC = 1.0          # fraction of max intensity the tallest stick reaches
 ASPECT_RATIO = 1.618          # Golden ratio for figure width/height when auto-scaling
 UWM_GOLD = "#ffbd00"        # Underwater Materials gold for titles / labels
 UWM_GREY = "#cccccc"        # Underwater Materials grey for titles / labels
@@ -200,7 +200,7 @@ def activity_to_stokes_intensity(
     freqs_cm1: np.ndarray,
     activities: np.ndarray,
     temp: float = DEFAULT_TEMP,
-    laser_wl_nm: float = DEFAULT_LASER_WL,
+    laser_wl: float = DEFAULT_LASER_WL,
     freq_cutoff_cm1: float = 1.0,
 ) -> np.ndarray:
     """
@@ -226,7 +226,7 @@ def activity_to_stokes_intensity(
         Calculated RASCBEC Raman activities (isotropic powder averaged: 45*a^2 + 7*g^2).
     temp : float, optional
         Sample temperature in Kelvin (default: 350.0 K, see ``DEFAULT_TEMP``).
-    laser_wl_nm : float, optional
+    laser_wl : float, optional
         Excitation laser wavelength in nm (default: 632.8 nm, see ``DEFAULT_LASER_WL``).
     freq_cutoff_cm1 : float, optional
         Minimum frequency threshold to avoid division by zero (default: 1.0 cm^-1).
@@ -236,7 +236,7 @@ def activity_to_stokes_intensity(
     np.ndarray
         Converted Stokes intensities ready for broadening and plotting.
     """
-    omega_L = 1.0e7 / laser_wl_nm  # Laser wavenumber in cm^-1
+    omega_L = 1.0e7 / laser_wl  # Laser wavenumber in cm^-1
     intensities = np.zeros_like(activities, dtype=float)
 
     for i, (f, act) in enumerate(zip(freqs_cm1, activities)):
@@ -814,7 +814,7 @@ def plot_raman_spectrum(
             freqs_cm1,
             activities,
             temp=temp,
-            laser_wl_nm=laser_wl,
+            laser_wl=laser_wl,
         )
         spectrum_label = "broadened I(ν)"
 
@@ -852,8 +852,8 @@ def plot_raman_spectrum(
                 )
         ax.legend(handles=[
             Line2D([0], [0], color='tab:blue', lw=1.6, label=spectrum_label),
-            Line2D([0], [0], color='tab:red', lw=STICK_LW, alpha=0.8,
-                   label="calculated sticks"),
+            Line2D([0], [0], color='tab:red', lw=STICK_LW, alpha=STICK_A,
+                   label="raw activity sticks"),
         ], loc='upper right')
     else:
         ax.legend(loc='upper right')
@@ -891,7 +891,7 @@ def plot_raman_spectrum(
 
     ax.set_xlim(freq_min, freq_max)
     ax.set_ylim(0, y_top)
-    ax.set_xlabel(r"Wavenumber (cm$^{-1}$)")
+    ax.set_xlabel(r"Raman Shift (cm$^{-1}$)")
     ax.set_ylabel("Intensity (simulated, arb. units)")
 
     # Grid visibility (default 'both' preserves the original behaviour).

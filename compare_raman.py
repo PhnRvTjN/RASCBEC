@@ -509,7 +509,7 @@ def build_all_spectra(all_freqs, all_acts, args):
             weights = activity_to_stokes_intensity(
                 freqs, acts,
                 temp=args.temp,
-                laser_wl_nm=args.laser_wl,
+                laser_wl=args.laser_wl,
             )
         all_weights.append(weights)
 

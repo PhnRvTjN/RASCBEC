@@ -954,7 +954,7 @@ def build_chemistry_metadata(species_names, species_n,
         dopants = (
             "Undoped"
             if not fractions or all(abs(x) < 1e-12 for x in fractions.values())
-            else " ".join(f"{name}={x:.2f}" for name, x in fractions.items())
+            else " ".join(f"{name}={x:.4f}" for name, x in fractions.items())
         )
         # Always include every declared dopant, including zeros.
         file_label = "-".join(
