@@ -632,7 +632,7 @@ def build_plot_title(all_meta, files, args, gamma):
                 gamma=gamma,
                 temp=args.temp,
                 raw_act=args.raw_act,
-                suffix="Raman Comparison",
+                suffix="Comparison",
                 show_legend=False,
             )
         else:
@@ -767,7 +767,7 @@ def draw_waterfall(ax, *, spectra, vis, all_freqs, all_weights, all_irreps,
         ax.set_ylim(0, stack_top)
     else:
         ax.set_ylim(bottom=0)
-    ax.set_xlabel(r'Wavenumber (cm$^{-1}$)')
+    ax.set_xlabel(r'Raman Shift (cm$^{-1}$)')
     ax.set_ylabel(y_label)
 
     # Grid visibility (default 'x' preserves the original x-grid-only look).

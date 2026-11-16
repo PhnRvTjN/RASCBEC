@@ -3,6 +3,10 @@
 r"""
 Title: Calculation of Raman Activities from VASP and Phonopy Output Files
 
+Automatic NAC extension: run with no arguments to detect nac_directions.json
+or 26 dirXX/direction.conf folders; otherwise retain original single-file mode.
+NAC outputs use the automatic _NAC suffix. No installer is required.
+
 Authors: Rui Zhang (original);
 Phani Ravi Teja Nunna (refactor and enhancements)
 
@@ -11,16 +15,21 @@ variable mode count (filtered imaginary and acoustic modes),
 subdirectory-based OUTCAR paths (./1/OUTCAR, ./m1/OUTCAR, ...),
 chemistry-based output filenames derived from POSCAR composition,
 CSV metadata header (formula, dopants, file label, E-field),
-plot output option,f
+plot output option,
 auto-generated informative plot title,
 direct phonopy YAML input (qpoints.yaml or mesh.yaml + irreps.yaml),
 mode symmetry labels (irreps) in CSV and plot,
+temperature/laser-wavelength Stokes intensity options (--temp, --laser-wl),
+basis-group and dopant roles (--bas, --dops) with base-formula reconstruction,
 vectorised Raman activity loop via numpy einsum,
-reverse-scan OUTCAR BEC reader.
+reverse-scan OUTCAR BEC reader,
+automatic NAC multi-direction mode (26-point Lebedev rule) with weighted
+spherical averaging.
 
 Date: 2025-04-28 (original); 2026-02-23 (patched); 2026-03-04 (chemistry naming);
       2026-03-05 (YAML phonon input, irrep labels, vectorised activity loop,
-                  reverse-scan OUTCAR BEC reader)
+                  reverse-scan OUTCAR BEC reader); 2026-11-16 (--temp/--laser-wl,
+                  --bas/--dops roles, NAC multi-direction mode)
 
 License: GNU GENERAL PUBLIC LICENSE
 
@@ -194,6 +203,16 @@ def parse_args():
                    help='Output CSV path (default: <chem>_E<E>.csv)')
     p.add_argument('--out-png', default=None,
                    help='Output PNG path (default: <chem>_E<E>.png)')
+    p.add_argument('--input-mode', choices=['auto', 'single', 'multi'], default='auto',
+                   help='Default auto: NAC manifest/dir folders first, otherwise original single YAML. Explicit --phonon-yaml selects single mode.')
+    p.add_argument('--directions-json', '--direction-json', dest='directions_json', default=None,
+                   help='Optional override; nac_directions.json is discovered automatically.')
+    p.add_argument('--nac-min-thz', type=float, default=0.1,
+                   help='Multi-mode minimum retained frequency in THz (default: 0.1).')
+    p.add_argument('--translation-overlap', type=float, default=0.95,
+                   help='Exclude rigid translations by mass-weighted overlap in multi mode (default: 0.95).')
+    p.add_argument('--overwrite', action='store_true',
+                   help='Allow replacing existing multi-mode outputs; single-mode behavior unchanged.')
     return p.parse_args()
 
 # ===========================================================================
@@ -999,8 +1018,7 @@ def raman_filename(chem, E):
 # IX. Main orchestrator
 # ===========================================================================
 
-def main():
-    args = parse_args()
+def main_single(args):
 
     # --- 1. Structure ---
     print("\n" + "=" * 70)
@@ -1075,6 +1093,243 @@ def main():
         print(f"Written : {out_png}")
 
     print("\nDone.")
+
+
+# ---------------------------------------------------------------------------
+# Automatic NAC-direction support. Scientific BEC/Raman routines above are
+# unchanged. Multi-mode activities are weighted once, before CSV output.
+# ---------------------------------------------------------------------------
+def _nac_poscar():
+    from pymatgen.core import Structure
+    return Structure.from_file('POSCAR')
+
+
+def _nac_config_direction(directory):
+    conf = directory / 'direction.conf'
+    if not conf.is_file():
+        raise ValueError(f'{directory}: no direction metadata. Keep nac_directions.json or direction.conf.')
+    text = conf.read_text()
+    if not re.search(r'^\s*NAC\s*=\s*\.TRUE\.', text, re.M | re.I):
+        raise ValueError(f'{conf}: NAC = .TRUE. not found.')
+    match = re.search(r'^\s*Q_DIRECTION\s*=\s*([^#\n]+)', text, re.M | re.I)
+    if not match:
+        raise ValueError(f'{conf}: Q_DIRECTION missing.')
+    q = np.array([float(v) for v in match.group(1).split()])
+    if q.shape != (3,) or not np.isfinite(q).all() or np.linalg.norm(q) == 0:
+        raise ValueError(f'{conf}: invalid Q_DIRECTION.')
+    return q
+
+
+def _nac_discover(args):
+    import json, sys
+    explicit_single = any(x == '--phonon-yaml' or x.startswith('--phonon-yaml=') for x in sys.argv[1:])
+    if args.input_mode == 'single' or (explicit_single and args.input_mode == 'auto' and not args.directions_json):
+        return None
+    manifest = Path(args.directions_json or 'nac_directions.json')
+    dirs = sorted(p for p in Path.cwd().iterdir()
+                  if p.is_dir() and re.fullmatch(r'dir\d+', p.name))
+    if not manifest.is_file() and not dirs:
+        if args.input_mode == 'multi' or args.directions_json:
+            raise FileNotFoundError('No NAC manifest/direction folders found.')
+        return None
+    structure = _nac_poscar()
+    lattice = np.asarray(structure.lattice.matrix)
+    data = None
+    if manifest.is_file():
+        data = json.loads(manifest.read_text())
+        rows = data.get('directions', [])
+        if 'nat' in data and int(data['nat']) != len(structure):
+            raise ValueError('Manifest atom count differs from POSCAR.')
+        if 'lattice' in data and not np.allclose(data['lattice'], lattice, atol=1e-7, rtol=0):
+            raise ValueError('Manifest lattice differs from POSCAR.')
+        if 'symbols' in data and data['symbols'] != [str(site.specie) for site in structure]:
+            raise ValueError('Manifest species/order differs from POSCAR.')
+        if 'scaled_positions' in data:
+            delta = (np.array(data['scaled_positions']) - structure.frac_coords + .5) % 1 - .5
+            if delta.shape != structure.frac_coords.shape or not np.allclose(delta, 0, atol=1e-7):
+                raise ValueError('Manifest atomic positions/order differs from POSCAR.')
+        root = manifest.resolve().parent
+    else:
+        rows = []
+        root = Path.cwd()
+        for directory in dirs:
+            q = _nac_config_direction(directory)
+            cart = q @ np.linalg.inv(lattice).T
+            cart /= np.linalg.norm(cart)
+            count = np.count_nonzero(np.abs(cart) > 1e-7)
+            rows.append({'directory': directory.name, 'yaml': f'{directory.name}/qpoints.yaml',
+                         'q_direction': q.tolist(), 'weight': {1:1/21, 2:4/105, 3:9/280}[count]})
+    if len(rows) != 26:
+        raise ValueError(f'Expected the complete 26-point rule; found {len(rows)}. No silent fallback to single mode.')
+    import itertools
+    expected = [np.array(v)/np.linalg.norm(v) for v in itertools.product((-1,0,1), repeat=3) if any(v)]
+    used = set(); paths = set(); validated = []
+    for row in rows:
+        path = (root / row.get('yaml', str(Path(row['directory'])/'qpoints.yaml'))).resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f'Missing NAC eigensystem: {path}')
+        if path in paths:
+            raise ValueError(f'Duplicate YAML: {path}')
+        paths.add(path)
+        if 'q_direction' in row:
+            q = np.asarray(row['q_direction'], dtype=float)
+        else:
+            q = _nac_config_direction(path.parent)
+        if q.shape != (3,) or not np.isfinite(q).all() or np.linalg.norm(q)==0:
+            raise ValueError(f'Invalid direction: {path}')
+        cart = q @ np.linalg.inv(lattice).T; cart /= np.linalg.norm(cart)
+        matches = [i for i,v in enumerate(expected) if np.allclose(v,cart,atol=1e-7)]
+        if len(matches)!=1 or matches[0] in used:
+            raise ValueError(f'Duplicate/non-Lebedev physical direction: {path}')
+        used.add(matches[0])
+        w = float(row['weight'])
+        required = {1:1/21,2:4/105,3:9/280}[np.count_nonzero(np.abs(cart)>1e-7)]
+        if not np.isfinite(w) or not np.isclose(w,required,atol=1e-12,rtol=0):
+            raise ValueError(f'Incorrect degree-7 Lebedev weight: {path}')
+        conf = path.parent/'direction.conf'
+        if conf.exists():
+            qc = _nac_config_direction(path.parent)
+            if not np.allclose(qc/np.linalg.norm(qc),q/np.linalg.norm(q),atol=1e-7):
+                raise ValueError(f'Manifest/config direction disagreement: {path}')
+        if 'cartesian' in row and not np.allclose(row['cartesian'],cart,atol=1e-7):
+            raise ValueError(f'Manifest Cartesian direction mismatch: {path}')
+        validated.append({'directory':row.get('directory',path.parent.name),'path':path,
+                          'weight':w,'cartesian':cart.tolist(),'q_direction':q.tolist()})
+    if not np.isclose(sum(r['weight'] for r in validated),1,atol=1e-12,rtol=0):
+        raise ValueError('Weights do not sum to one.')
+    return validated
+
+
+def _nac_load_direction(row, structure, masses, args):
+    import hashlib, json, warnings
+    path = row['path']
+    marker = path.parent/'complete.json'
+    if marker.exists():
+        recorded = json.loads(marker.read_text()).get('yaml_sha256')
+        if recorded and recorded != hashlib.sha256(path.read_bytes()).hexdigest():
+            raise ValueError(f'YAML checksum mismatch: {path}')
+    with path.open() as f:
+        data = yaml.safe_load(f)
+    points = data.get('phonon',[])
+    if len(points)!=1 or not np.allclose(points[0].get('q-position',[99]*3),0,atol=1e-10):
+        raise ValueError(f'Expected one Gamma point: {path}')
+    nat = len(structure)
+    if 'lattice' in data and not np.allclose(data['lattice'], structure.lattice.matrix, atol=1e-6,rtol=0):
+        raise ValueError(f'YAML lattice differs from POSCAR: {path}')
+    atoms = data.get('points')
+    if atoms is not None:
+        if len(atoms)!=nat: raise ValueError(f'YAML atom count mismatch: {path}')
+        for site,atom in zip(structure,atoms):
+            if atom.get('symbol',str(site.specie)) != str(site.specie):
+                raise ValueError(f'YAML atom order differs: {path}')
+            if 'coordinates' in atom:
+                delta = (np.array(atom['coordinates'])-site.frac_coords+.5)%1-.5
+                if not np.allclose(delta,0,atol=1e-6): raise ValueError(f'YAML positions differ: {path}')
+    bands = points[0]['band']
+    if len(bands)!=3*nat: raise ValueError(f'Expected {3*nat} modes: {path}')
+    frequencies=[];vectors=[];indices=[];skipped=[]
+    trans=np.zeros((3*nat,3))
+    for axis in range(3): trans[axis::3,axis]=np.sqrt(masses)/np.sqrt(sum(masses))
+    for i,band in enumerate(bands,1):
+        freq=float(band['frequency'])
+        if not np.isfinite(freq): raise ValueError(f'Invalid frequency: {path}')
+        raw=[atom for atom in band['eigenvector'] if atom is not None]
+        arr=np.asarray(raw,dtype=float)
+        if arr.shape!=(nat,3,2) or not np.isfinite(arr).all(): raise ValueError(f'Invalid eigenvector: {path}')
+        vec=(arr[:,:,0]+1j*arr[:,:,1]).ravel()
+        if not np.isclose(np.linalg.norm(vec),1,atol=1e-5): raise ValueError(f'Nonunit eigenvector: {path}')
+        vec*=np.exp(-1j*np.angle(vec[np.argmax(abs(vec))]))
+        if np.max(abs(vec.imag))>1e-7: raise ValueError(f'Complex eigenvector needs complex Raman support: {path}')
+        vec=vec.real
+        translation=float(np.sum(np.abs(trans.T@vec)**2))
+        reason = ('below_minimum_frequency' if freq<args.nac_min_thz else
+                  'rigid_translation' if translation>args.translation_overlap else '')
+        if reason:
+            skipped.append({'source_mode':i,'frequency_thz':freq,'translation_overlap':translation,'reason':reason})
+            continue
+        frequencies.append(freq*THZCM1);vectors.append(vec);indices.append(i)
+    if not vectors: raise ValueError(f'No retained modes: {path}')
+    if any(float(b['frequency']) < -.1 for b in bands):
+        warnings.warn(f'{path}: frequencies below -0.1 THz exist; examine structural stability.')
+    return np.array(frequencies),np.column_stack(vectors),indices,skipped
+
+
+def _nac_write_outputs(path, chem, E, records, directions, skipped, args):
+    import json, os, tempfile
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    audit=path.with_suffix('.directions.json')
+    if not args.overwrite:
+        for candidate in (path,audit):
+            if candidate.exists(): raise FileExistsError(f'{candidate} exists; use --overwrite to replace deliberately.')
+    lines=[f"# Formula: {chem['formula']}"]
+    if chem['dopants'] and chem['dopants']!='Undoped': lines.append(f"# Dopants: {chem['dopants']}")
+    if chem['file_label']: lines.append(f"# File_Label: {chem['file_label']}")
+    lines += [f'# E_field: {E:g}', '# Phonon_treatment: NAC_Lebedev26',
+              '# Activity_semantics: quadrature_weight_times_raw_Placzek_activity',
+              '# Row_semantics: directional_sticks_not_unique_modes',
+              '# Mode,Freq_cm-1,Activity,Irrep']
+    for i,r in enumerate(records,1):
+        r['output_row']=i
+        lines.append(f"{i:06d},{r['frequency_cm1']:.12g},{r['weighted_activity']:.12g},")
+    details={'treatment':'NAC modes with fixed-field RASCBEC response; no extra electro-optic correction',
+             'minimum_frequency_thz':args.nac_min_thz,'translation_overlap_threshold':args.translation_overlap,
+             'directions':[{**r,'path':str(r['path'])} for r in directions],
+             'skipped_modes':skipped,'sticks':records}
+    for destination,content in [(path,'\n'.join(lines)+'\n'),(audit,json.dumps(details,indent=2)+'\n')]:
+        with tempfile.NamedTemporaryFile(mode='w',encoding='utf-8',dir=destination.parent,delete=False) as f:
+            temporary=Path(f.name);f.write(content)
+        os.replace(temporary,destination)
+    print(f'Written : {path} ({len(records)} weighted directional sticks)')
+    print(f'Written : {audit}')
+
+
+def main():
+    args=parse_args()
+    directions=_nac_discover(args)
+    if directions is None:
+        return main_single(args)
+    if args.nac_min_thz<0 or not np.isfinite(args.nac_min_thz):
+        raise ValueError('--nac-min-thz must be finite and nonnegative.')
+    if not 0<args.translation_overlap<=1:
+        raise ValueError('--translation-overlap must lie in (0,1].')
+    structure=_nac_poscar()
+    _,species_n,atomic_mass,_,nat,_,species_names=structure_info('POSCAR')
+    E=args.E if args.E is not None else read_efield_pead(OUTCAR_MAP['1'])
+    if not np.isfinite(E) or E<=0: raise ValueError('Finite positive field magnitude required.')
+    chem=build_chemistry_metadata(species_names,species_n,bas_species=args.bas,dop_species=args.dops)
+    base=raman_filename(chem,E)+'_NAC'
+    out_csv=Path(args.out_csv or f'{base}.csv')
+    out_png=Path(args.out_png or out_csv.with_suffix('.png'))
+    targets=[out_csv,out_csv.with_suffix('.directions.json')]+([] if args.no_plot else [out_png])
+    if not args.overwrite:
+        for path in targets:
+            if path.exists(): raise FileExistsError(f'{path} exists. Use --overwrite for an intentional rerun.')
+    print(f'Input   : automatic NAC multi-direction mode ({len(directions)} directions)')
+    print(f'Output  : {out_csv}')
+    print('Loading the eight BEC files once ...')
+    charges=load_bec_charges(OUTCAR_MAP,nat)
+    dq=build_charge_derivatives(charges,nat,E)
+    masses=np.repeat(atomic_mass,species_n.astype(int))
+    records=[];skipped={}
+    for row in directions:
+        freqs,vecs,indices,rejected=_nac_load_direction(row,structure,masses,args)
+        raw=np.asarray(compute_raman_activities(dq,vecs,nat,len(freqs),atomic_mass,species_n))
+        if not np.isfinite(raw).all() or (raw<0).any(): raise ValueError('Invalid Raman activity.')
+        for freq,activity,index in zip(freqs,raw,indices):
+            records.append({'direction':row['directory'],'source_mode':index,'frequency_cm1':float(freq),
+                            'weight':row['weight'],'raw_activity':float(activity),
+                            'weighted_activity':float(activity*row['weight'])})
+        skipped[row['directory']]=rejected
+        print(f"  {row['directory']}: {len(freqs)} retained, {len(rejected)} excluded")
+    records.sort(key=lambda r:r['frequency_cm1'])
+    _nac_write_outputs(out_csv,chem,E,records,directions,skipped,args)
+    if not args.no_plot:
+        out_png.parent.mkdir(parents=True,exist_ok=True)
+        title=build_raman_title(chem,E,args.gamma*THZCM1,args.temp,suffix='NAC, spherical average')
+        plot_raman_spectrum(dat_file=out_csv,out_png=out_png,gamma=args.gamma*THZCM1,
+            freq_min=args.freq_min,freq_max=args.freq_max,sticks=not args.no_sticks,
+            n_labels=args.n_labels,title=title,temp=args.temp,laser_wl=args.laser_wl)
+    print('Done. Weights are already included; downstream Stokes conversion/broadening remain unchanged.')
 
 if __name__ == '__main__':
     main()

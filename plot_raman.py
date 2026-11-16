@@ -44,12 +44,12 @@ Key Physical Relevance (e.g., LLTO vs. Na3PS4):
    low-frequency intensity by 4x to 7x relative to high-frequency Ti-O stretches
    (500-600 cm^-1).
 3. By default, this updated module evaluates the full temperature-dependent Stokes
-   scattered intensity :math:`I(\\nu, T)` at T = 350 K using a 632.8 nm laser line,
+   scattered intensity :math:`I(\\nu, T)` at T = 300 K using a 632.8 nm laser line,
    accurately reproducing laboratory intensity distributions. The unweighted raw
    Raman activity :math:`S(\\nu)` can still be plotted using ``--raw-act``.
 
 Usage:
-    python plot_raman.py                          # auto-uses the only CSV in cwd (T=350K, 632.8nm)
+    python plot_raman.py                          # auto-uses the only CSV in cwd (T=300K, 632.8nm)
     python plot_raman.py --dat LLTO_E0.02.csv
     python plot_raman.py --dat LLTO_E0.02.csv --temp 280 --laser-wl 532
     python plot_raman.py --dat LLTO_E0.02.csv --raw-act     # legacy S(nu) mode
@@ -79,7 +79,7 @@ from scipy.signal import find_peaks
 THZCM1 = 33.356409519815204   # 1 THz in cm^-1 (c = 2.99792458e10 cm/s)
 KB_CM1 = 0.69503476           # Boltzmann constant kB in cm^-1 / K
 DEFAULT_LASER_WL = 632.8      # Default excitation laser wavelength in nm
-DEFAULT_TEMP = 350.0          # Default sample temperature in Kelvin
+DEFAULT_TEMP = 300.0          # Default sample temperature in Kelvin
 STICK_A = 0.6                 # stick alpha (pre-broadened stick intensity)
 STICK_LW = 0.8                # stick linewidth
 STICK_MAX_FRAC = 1.0          # fraction of max intensity the tallest stick reaches
@@ -225,7 +225,7 @@ def activity_to_stokes_intensity(
     activities : np.ndarray
         Calculated RASCBEC Raman activities (isotropic powder averaged: 45*a^2 + 7*g^2).
     temp : float, optional
-        Sample temperature in Kelvin (default: 350.0 K, see ``DEFAULT_TEMP``).
+        Sample temperature in Kelvin (default: 300.0 K, see ``DEFAULT_TEMP``).
     laser_wl : float, optional
         Excitation laser wavelength in nm (default: 632.8 nm, see ``DEFAULT_LASER_WL``).
     freq_cutoff_cm1 : float, optional
@@ -749,7 +749,7 @@ def plot_raman_spectrum(
         I(nu, T) (default: False).
     temp : float, optional
         Sample temperature in Kelvin for the Bose-Einstein factor
-        (default: 350.0 K, see ``DEFAULT_TEMP``).
+        (default: 300.0 K, see ``DEFAULT_TEMP``).
     laser_wl : float, optional
         Laser excitation wavelength in nm for the (nu_L - nu)^4 factor
         (default: 632.8 nm, see ``DEFAULT_LASER_WL``).
@@ -951,7 +951,7 @@ def parse_args():
                    help='Output PNG filename (default: dat stem + .png)')
     # --- physical model (what is plotted and under what conditions) ---
     p.add_argument('--temp', type=float, default=DEFAULT_TEMP,
-                   help='Sample temperature in K for Bose-Einstein factor (default: 350.0 K)')
+                   help='Sample temperature in K for Bose-Einstein factor (default: 300.0 K)')
     p.add_argument('--laser-wl', type=float, default=DEFAULT_LASER_WL,
                    help='Excitation laser wavelength in nm (default: 632.8 nm)')
     p.add_argument('--raw-act', action='store_true',

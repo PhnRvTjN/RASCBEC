@@ -29,7 +29,7 @@ term (:math:`(\nu_L - \nu_s)^4`):
     \left[ \frac{1}{1 - \exp\left(-\frac{h c \nu_s}{k_B T}\right)} \right] A_s
 
 By default every mode is converted to a physical Stokes scattered intensity
-at T = 350 K (632.8 nm laser line), directly matching experimental
+at T = 300 K (632.8 nm laser line), directly matching experimental
 multi-composition comparisons. Raw activity comparison remains available
 via ``--raw-act``.
 
@@ -85,7 +85,7 @@ Dependencies: Python >=3.9, NumPy, Matplotlib, SciPy (via the shared
 
 Usage
 -----
-    # Full-spectrum matrix (auto range), default 350 K / 632.8 nm Stokes
+    # Full-spectrum matrix (auto range), default 300 K / 632.8 nm Stokes
     python compare_raman_matrix.py Na3PS4_matrix.csv --norm global
 
     # Zoom window into the P-S stretch region, shared Ca/Cl axes
