@@ -1156,7 +1156,7 @@ def _nac_discover(args):
             q = _nac_config_direction(directory)
             cart = q @ np.linalg.inv(lattice).T
             cart /= np.linalg.norm(cart)
-            count = np.count_nonzero(np.abs(cart) > 1e-7)
+            count = int(np.count_nonzero(np.abs(cart) > 1e-7))
             rows.append({'directory': directory.name, 'yaml': f'{directory.name}/qpoints.yaml',
                          'q_direction': q.tolist(), 'weight': {1:1/21, 2:4/105, 3:9/280}[count]})
     if len(rows) != 26:
@@ -1183,7 +1183,7 @@ def _nac_discover(args):
             raise ValueError(f'Duplicate/non-Lebedev physical direction: {path}')
         used.add(matches[0])
         w = float(row['weight'])
-        required = {1:1/21,2:4/105,3:9/280}[np.count_nonzero(np.abs(cart)>1e-7)]
+        required = {1:1/21,2:4/105,3:9/280}[int(np.count_nonzero(np.abs(cart)>1e-7))]
         if not np.isfinite(w) or not np.isclose(w,required,atol=1e-12,rtol=0):
             raise ValueError(f'Incorrect degree-7 Lebedev weight: {path}')
         conf = path.parent/'direction.conf'

@@ -1126,7 +1126,7 @@ def main(argv=None):
         _, axes, headings, cells, reference = layout
         plot_title, title_line = build_plot_title(samples, a, result['width'])
         if title_line in ("line1", "line2"):
-            plot_title = select_title_line(plot_title, title_line)
+            plot_title = select_title_line(plot_title or "", title_line)
         fig = draw(samples, axes, headings, cells, reference, result, a,
                    plot_title, title_line)
         try:
