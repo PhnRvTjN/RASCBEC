@@ -1,0 +1,89 @@
+# =============================================================================
+# RASCBEC — Raman spectroscopy via Born effective charge (VASP + phonopy)
+# -----------------------------------------------------------------------------
+# NOTE: .gitignore only affects *untracked* files. Anything already committed
+# (e.g. the files under Example/) stays tracked regardless of these rules.
+# To commit a generated result as example data, use `git add -f <file>`.
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+# Byte-compiled / cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtual environments (pick the style your team uses)
+.venv/
+venv/
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Coverage / test caches
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+
+# ---------------------------------------------------------------------------
+# Editors / OS noise
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+
+# ---------------------------------------------------------------------------
+# VASP — run *output* files only
+#   Inputs (INCAR / POSCAR / KPOINTS / POTCAR) are intentionally NOT ignored.
+#   OUTCAR here is the exact filename used by the subdirectory run layout
+#   (./1/OUTCAR, ./m1/OUTCAR, ...); it does not match Example/OUTCAR1 etc.
+# ---------------------------------------------------------------------------
+OUTCAR
+OSZICAR
+CONTCAR
+CHGCAR
+LOCPOT
+WAVECAR
+EIGENVAL
+IBZKPT
+DOSCAR
+vasprun.xml
+vasprun.xml*
+VASPRUN.xml*
+
+
+# ---------------------------------------------------------------------------
+# Generated results — Raman spectra, plots, and provenance audit
+#   The pipeline writes these into the working directory with chemistry-based
+#   names (e.g. Na3PS4_Ca01-Cl06_E0.02.csv / .png). Keep them out of VCS.
+#   Legacy intermediate .dat files (eigvecs_*.dat, freqs_*.dat, ...) too.
+# ---------------------------------------------------------------------------
+*.csv
+*.png
+*.pdf
+*.dat
+# NAC Lebedev provenance audit file
+*_provenance.json
+*_audit.json
+
+
+# ---------------------------------------------------------------------------
+# Local logs
+# ---------------------------------------------------------------------------
+*.log
