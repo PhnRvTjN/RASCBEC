@@ -1230,9 +1230,20 @@ def _nac_load_direction(row, structure, masses, args):
     frequencies=[];vectors=[];indices=[];skipped=[]
     trans=np.zeros((3*nat,3))
     for axis in range(3): trans[axis::3,axis]=np.sqrt(masses)/np.sqrt(sum(masses))
-    for i,band in enumerate(bands,1):
-        freq=float(band['frequency'])
-        if not np.isfinite(freq): raise ValueError(f'Invalid frequency: {path}')
+    for i, band in enumerate(bands, 1):
+        freq = float(band['frequency'])
+        if not np.isfinite(freq):
+            raise ValueError(f'Invalid frequency: {path}')
+        # Exclude these modes before phase/realness checks.
+        if freq < args.nac_min_thz:
+            skipped.append({
+                'source_mode': i,
+                'frequency_thz': freq,
+                'translation_overlap': None,
+                'reason': 'below_minimum_frequency',
+            })
+            continue
+        # Existing eigenvector reading and validation follows.
         raw=[atom for atom in band['eigenvector'] if atom is not None]
         arr=np.asarray(raw,dtype=float)
         if arr.shape!=(nat,3,2) or not np.isfinite(arr).all(): raise ValueError(f'Invalid eigenvector: {path}')
