@@ -1,30 +1,40 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-"""
+r"""
 Title: Calculation of Raman Activities from VASP DFPT Output Files
 
-Authors: Rui Zhang (original);
-Phani Ravi Teja Nunna (refactor and enhancements)
+Authors:
+  Rui Zhang               -- original RASCBEC method and script
+  Phani Ravi Teja Nunna   -- refactor and enhancements
 
-Patches: auto atomic-mass lookup via pymatgen,
-variable mode count (filtered imaginary modes),
-subdirectory-based OUTCAR paths (./1/OUTCAR, ./m1/OUTCAR, ...),
-chemistry-based output filenames derived from POSCAR composition,
-CSV metadata header (formula, dopants, file label, E-field),
-auto-read EFIELD_PEAD from OUTCAR,
-plot output option,
-auto-generated informative plot title,
-basis-group and dopant roles (--bas, --dops) with base-formula reconstruction,
-vectorised Raman activity loop via numpy einsum,
-reverse-scan OUTCAR BEC reader,
-temperature/laser-wavelength Stokes intensity options (--temp, --laser-wl),
---jobs parallel BEC file reads (thread pool, I/O bound).
+Capabilities (beyond the original single-file tool):
+  * Auto atomic-mass lookup via pymatgen (no manual mass table)
+  * Variable mode count -- imaginary and acoustic modes filtered
+  * Subdirectory OUTCAR layout (./1/OUTCAR, ./m1/OUTCAR, ...)
+  * Chemistry-based output filenames derived from the POSCAR composition
+  * CSV metadata header (formula, dopants, file label, E-field)
+  * Auto-read EFIELD_PEAD from the OUTCAR
+  * Plot output with an auto-generated informative title
+  * Temperature / laser-wavelength Stokes-intensity options (--temp, --laser-wl)
+  * Basis-group and dopant roles (--bas, --dops) with base-formula reconstruction
+  * Vectorised Raman-activity loop (numpy einsum)
+  * Reverse-scan OUTCAR BEC reader
+  * --jobs parallel BEC file reads (thread pool; the reads are I/O bound)
+  * Existing output files are always overwritten (no flag required)
 
-Date: 2025-04-28 (original); 2026-02-23 (patched); 2026-03-04 (chemistry naming);
-      2026-11-16 (parity with RASCBEC_phonopy.py: --bas/--dops roles, base-formula
-                  reconstruction, vectorised activity loop, reverse-scan BEC reader,
-                  --temp/--laser-wl, shared two-line plot title);
-      2026-11-19 (--jobs parallel BEC file reads)
+Date:
+  2025-04-28  original (Rui Zhang)
+  2026-02-23  refactor: pymatgen atomic masses, variable mode count,
+              subdirectory OUTCAR paths, chemistry-based output filenames,
+              CSV metadata header, auto-read EFIELD_PEAD, plot option,
+              informative plot title
+  2026-03-04  chemistry-based naming (dopant file labels)
+  2026-11-16  parity with RASCBEC_phonopy.py: --bas/--dops roles,
+              base-formula reconstruction, vectorised activity loop,
+              reverse-scan BEC reader, --temp/--laser-wl, shared two-line
+              plot title
+  2026-11-19  --jobs parallel BEC file reads
 
 License: GNU GENERAL PUBLIC LICENSE
 
@@ -44,28 +54,26 @@ Key distinctions from RASCBEC_phonopy.py:
 - All other routines (BEC reading, dZ*/dE tensor, Raman activity, chemistry
   metadata, CSV format, plotting) are identical to RASCBEC_phonopy.py.
 
-E-field magnitude is read automatically from ./1/OUTCAR (EFIELD_PEAD tag).
-Override with --E only if you want to force a specific value.
+E-field magnitude is read automatically from ./1/OUTCAR (EFIELD_PEAD tag);
+override with --E only to force a specific value.
 
-Required files (in working directory):
-POSCAR             -- structure file
-./1/OUTCAR         -- BEC, E-field along unrotated +
-./m1/OUTCAR        -- BEC, E-field along unrotated -
-./x/OUTCAR         -- BEC, E-field along +x (rotated along x)
-./mx/OUTCAR        -- BEC, E-field along -x
-./y/OUTCAR         -- BEC, E-field along +y (rotated along y)
-./my/OUTCAR        -- BEC, E-field along -y
-./z/OUTCAR         -- BEC, E-field along +z (rotated along z)
-./mz/OUTCAR        -- BEC, E-field along -z
-freqs_vasp.dat     -- phonon frequencies, shape (N_modes,), unit cm-1
-eigvecs_vasp.dat   -- mass-normalised eigenvectors, shape (3N x N_modes)
+Required files (in the working directory):
+  POSCAR             -- structure file
+  ./1/OUTCAR         -- BEC, E-field along unrotated +
+  ./m1/OUTCAR        -- BEC, E-field along unrotated -
+  ./x/OUTCAR         -- BEC, E-field along +x (rotated along x)
+  ./mx/OUTCAR        -- BEC, E-field along -x
+  ./y/OUTCAR         -- BEC, E-field along +y (rotated along y)
+  ./my/OUTCAR        -- BEC, E-field along -y
+  ./z/OUTCAR         -- BEC, E-field along +z (rotated along z)
+  ./mz/OUTCAR        -- BEC, E-field along -z
+  freqs_vasp.dat     -- phonon frequencies, shape (N_modes,), unit cm-1
+  eigvecs_vasp.dat   -- mass-normalised eigenvectors, shape (3N x N_modes)
 
 Output naming (chemistry-based, derived from POSCAR; no directory tags):
-<formula>[_<dopantpart>... ]_E<E>.csv / .png
-
-Examples:
-undoped Na3PS4, E=0.02  -> Na3PS4_E0.02.csv
-Ca+Cl co-doped Na3PS4   -> Na3PS4_Ca01-Cl06_E0.02.csv
+  <formula>[_<dopantpart>...]_E<E>.csv / .png
+  undoped Na3PS4, E=0.02  -> Na3PS4_E0.02.csv
+  Ca+Cl co-doped Na3PS4   -> Na3PS4_Ca01-Cl06_E0.02.csv
 
 Dopant roles (--bas / --dops)
 -----------------------------
@@ -74,18 +82,18 @@ Explicit --bas / --dops values take precedence over automatic inference
 When --bas is given, it defines the host-formula normalization AND the
 denominator for the dopant x-values (x = n_dopant / n_bas), e.g.
 Li5La9Ti16O48 --bas Ti -> Li0.31La0.56TiO3. When omitted, the
-least-abundant host species is used as the legacy reference.
+least-abundant host species is used as the reference.
 
---bas may also be a `+` joined group of species (e.g. --bas Ti+Ga). The
+--bas may also be a `+`-joined group of species (e.g. --bas Ti+Ga). The
 group's member counts are summed into a single reference, so the group is
 normalized to one and may include dopant species. For doped LLTO this
 normalizes the formula so Ti + Ga = 1 (e.g. Li60La90Ti150O360 with
---bas Ti+Ga -> Li0.38La0.56Ti0.94O2.25, and dopant x-values reported
+--bas Ti+Ga -> Li0.38La0.56Ti0.94O2.25, dopant x-values reported
 per 160 Ti+Ga sites).
 
 Base (undoped) formula
 -----------------------
-The stored/# Formula value is the BASE host composition, not the raw
+The stored / `# Formula` value is the BASE host composition, not the raw
 doped host-only count. The supercell contains only the host atoms that were
 NOT displaced, so the base is recovered by adding back the atoms each dopant
 took (or added) at every host element (see DOPANT_SUBSTITUTIONS), then
@@ -94,25 +102,27 @@ doped host counts are Na20P8S30 (Ca=1, Cl=2) is reported as the base
 Na3PS4, not Na2.5P1S3.75.
 
 CSV metadata header (parsed by compare_raman.py & plot_raman.py):
-# Formula: Na3PS4
-# Dopants: Ca=0.125 Cl=0.0625   <- omitted if undoped
-# File_Label: Ca01-Cl06         <- omitted if undoped
-# E_field: 0.02
-# Mode,Freq_cm-1,Activity
-0001,<freq>,<activity>
-...
+  # Formula: Na3PS4
+  # Dopants: Ca=0.125 Cl=0.0625   <- omitted if undoped
+  # File_Label: Ca01-Cl06         <- omitted if undoped
+  # E_field: 0.02
+  # Mode,Freq_cm-1,Activity
+  0001,<freq>,<activity>
+  ...
+  (the Irrep column is absent -- VASP .dat inputs carry no irreps.yaml)
 
-Dependencies: argparse, pathlib, re, numpy, pymatgen, plot_raman
+Dependencies:
+  argparse, pathlib, re, numpy, pymatgen, plot_raman
 
 Usage:
-python RASCBEC_VASP.py                          # all defaults
-python RASCBEC_VASP.py --E 0.02 --gamma 0.2
-python RASCBEC_VASP.py --no-plot
-python RASCBEC_VASP.py --freq-min 50 --freq-max 600
-python RASCBEC_VASP.py --bas Ti+Ga --dops Y Ga  # doped LLTO, Ti+Ga = 1
-python RASCBEC_VASP.py --jobs 8                 # parallel BEC file reads
-python RASCBEC_VASP.py --help
-(existing output files are always overwritten -- no flag required)
+  python RASCBEC_VASP.py                          # all defaults
+  python RASCBEC_VASP.py --E 0.02 --gamma 0.2
+  python RASCBEC_VASP.py --no-plot
+  python RASCBEC_VASP.py --freq-min 50 --freq-max 600
+  python RASCBEC_VASP.py --bas Ti+Ga --dops Y Ga  # doped LLTO, Ti+Ga = 1
+  python RASCBEC_VASP.py --jobs 8                 # parallel BEC file reads
+  python RASCBEC_VASP.py --help
+  (existing output files are always overwritten -- no flag required)
 """
 
 import argparse
