@@ -56,7 +56,17 @@ Usage:
     python plot_raman.py --dat LLTO_E0.02.csv --gamma 0.25
     python plot_raman.py --dat LLTO_E0.02.csv --freq-min 50 --freq-max 900
     python plot_raman.py --dat LLTO_E0.02.csv --no-sticks --n-labels 10
+    python plot_raman.py --dat LLTO_E0.02.csv --vector       # fast, publication SVG
+    python plot_raman.py --dat LLTO_E0.02.csv --dpi 300      # faster raster PNG
     python plot_raman.py --help
+
+Performance:
+    The stick spectrum is drawn as a single vectorized LineCollection (not one
+    line object per mode) and the Stokes conversion is vectorized, so plotting
+    stays fast even for multi-thousand-mode outputs. The remaining dominant cost
+    is the raster render (savefig), which scales with output size; use --vector
+    (resolution-independent SVG) or a lower --dpi for a faster / print-ready
+    result.
 """
 
 import argparse
@@ -70,6 +80,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.collections import LineCollection
 from scipy.signal import find_peaks
 
 # ---------------------------------------------------------------------------
@@ -237,24 +248,30 @@ def activity_to_stokes_intensity(
         Converted Stokes intensities ready for broadening and plotting.
     """
     omega_L = 1.0e7 / laser_wl  # Laser wavenumber in cm^-1
-    intensities = np.zeros_like(activities, dtype=float)
+    freqs = np.asarray(freqs_cm1, dtype=float)
+    acts = np.asarray(activities, dtype=float)
+    intensities = np.zeros_like(acts, dtype=float)
 
-    for i, (f, act) in enumerate(zip(freqs_cm1, activities)):
-        if act <= 0.0 or f <= freq_cutoff_cm1:
-            continue
+    # Modes with zero activity or at/below the cutoff are assigned zero
+    # intensity (this also guards the 1/nu and Bose divergences).
+    mask = (acts > 0.0) & (freqs > freq_cutoff_cm1)
+    if not np.any(mask):
+        return intensities
 
-        # Bose-Einstein occupation factor for Stokes scattering: n(nu, T) + 1
-        x = f / (KB_CM1 * temp)
-        if x > 700.0:
-            bose = 1.0
-        else:
-            bose = 1.0 / (1.0 - np.exp(-x))
+    f = freqs[mask]
 
-        # Dipole scattering and classical coordinate amplitude penalty
-        laser_term = ((omega_L - f) / omega_L) ** 4
-        harmonic_term = 1.0 / f
+    # Bose-Einstein occupation factor for Stokes scattering: n(nu, T) + 1.
+    # For x > 700 the exponential underflows to ~0, so n+1 -> 1 exactly.
+    x = f / (KB_CM1 * temp)
+    bose = np.empty_like(f)
+    big = x > 700.0
+    bose[big] = 1.0
+    if np.any(~big):
+        bose[~big] = 1.0 / (1.0 - np.exp(-x[~big]))
 
-        intensities[i] = act * laser_term * harmonic_term * bose
+    # Dipole scattering and classical coordinate amplitude penalty.
+    laser_term = ((omega_L - f) / omega_L) ** 4
+    intensities[mask] = acts[mask] * laser_term * (1.0 / f) * bose
 
     return intensities
 
@@ -706,6 +723,8 @@ def plot_raman_spectrum(
     # --- input / output ---
     dat_file: Union[str, Path],
     out_png: Optional[Union[str, Path]] = None,
+    save_dpi: Optional[int] = None,
+    vector: bool = False,
     # --- physical model (what is plotted and under what conditions) ---
     raw_act: bool = False,
     temp: float = DEFAULT_TEMP,
@@ -743,7 +762,15 @@ def plot_raman_spectrum(
     dat_file : str or Path
         Input CSV file path (required).
     out_png : str or Path, optional
-        Output PNG path (default: dat_file stem + .png).
+        Output image path (default: dat_file stem + ``.png``; ``.svg`` when
+        ``vector`` is True).
+    save_dpi : int, optional
+        Raster DPI for PNG output (default: 600, i.e. ``rcParams['savefig.dpi']``).
+        Lower values render faster at the cost of raster resolution (e.g.
+        ``--dpi 300`` is roughly 3x faster); irrelevant for ``vector`` output.
+    vector : bool, optional
+        If True, write a resolution-independent SVG instead of a PNG
+        (default: False). Recommended for publication; also faster to produce.
     raw_act : bool, optional
         If True, plot raw Raman activity S(nu) instead of Stokes intensity
         I(nu, T) (default: False).
@@ -789,7 +816,13 @@ def plot_raman_spectrum(
         raise ValueError(f"gamma must be positive; got {gamma}")
 
     set_style()
-    out_png = out_png or Path(dat_file).with_suffix('.png').name
+
+    # Resolve the output path, picking the right extension for the format
+    # (SVG for vector output, PNG otherwise).
+    if out_png:
+        out_path = Path(out_png)
+    else:
+        out_path = Path(dat_file).with_suffix('.svg' if vector else '.png')
 
     freqs_cm1, activities, irrep_labels, _meta = read_raman_csv(dat_file)
     has_irreps = any(lbl != '' for lbl in irrep_labels)
@@ -840,16 +873,34 @@ def plot_raman_spectrum(
     ax.fill_between(x, spectrum, alpha=0.2, color='tab:blue', zorder=2)
     ax.plot(x, spectrum, color='tab:blue', lw=1.6, label=spectrum_label, zorder=4)
 
-    # Calculated sticks
+    # Calculated sticks. All sticks are drawn as ONE LineCollection (a single
+    # artist / draw call) rather than one vlines() Line2D per mode -- that
+    # per-mode artist overhead dominates render time for large mode counts
+    # (e.g. >8k modes), while a single collection is drawn in one pass.
     if sticks and freqs_cm1.size:
         max_weight = mode_weights.max()
         stick_scale = STICK_MAX_FRAC / max_weight if max_weight > 0 else 1.0
-        for f, w in zip(freqs_cm1, mode_weights):
-            if w > 0 and freq_min <= f <= freq_max:
-                ax.vlines(
-                    f, 0.0, w * stick_scale,
-                    color='tab:red', lw=STICK_LW, alpha=STICK_A, zorder=3
+        f_arr = np.asarray(freqs_cm1, dtype=float)
+        w_arr = np.asarray(mode_weights, dtype=float)
+        sel = (w_arr > 0) & (f_arr >= freq_min) & (f_arr <= freq_max)
+        if np.any(sel):
+            fs = f_arr[sel]
+            tops = w_arr[sel] * stick_scale
+            # Each stick is a segment (f, 0) -> (f, top).
+            segments = np.empty((fs.size, 2, 2))
+            segments[:, 0, 0] = fs
+            segments[:, 0, 1] = 0.0
+            segments[:, 1, 0] = fs
+            segments[:, 1, 1] = tops
+            ax.add_collection(
+                LineCollection(
+                    segments,  # type: ignore[reportArgumentType]
+                    colors='tab:red',
+                    alpha=STICK_A,
+                    linewidths=STICK_LW,
+                    zorder=3,
                 )
+            )
         ax.legend(handles=[
             Line2D([0], [0], color='tab:blue', lw=1.6, label=spectrum_label),
             Line2D([0], [0], color='tab:red', lw=STICK_LW, alpha=STICK_A,
@@ -930,9 +981,18 @@ def plot_raman_spectrum(
     ax.set_title(plot_title)
 
     fig.tight_layout()
-    fig.savefig(out_png, bbox_inches="tight")
+
+    # Vector (SVG) output ignores DPI and is resolution-independent; PNG uses
+    # the requested DPI (default 600). Both are the raster-size levers that
+    # dominate savefig cost, so a lower DPI or vector format renders faster.
+    save_kwargs: dict = {"bbox_inches": "tight"}
+    if vector:
+        save_kwargs["format"] = "svg"
+    elif save_dpi:
+        save_kwargs["dpi"] = int(save_dpi)
+    fig.savefig(out_path, **save_kwargs)
     plt.close(fig)
-    print(f"Saved: {out_png}")
+    print(f"Saved: {out_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -948,7 +1008,14 @@ def parse_args():
                    help='Input CSV file (e.g. Li0.31La0.56TiO3_E0.02.csv). '
                         'If omitted, the single CSV in the current directory is used.')
     p.add_argument('--out', default=None,
-                   help='Output PNG filename (default: dat stem + .png)')
+                   help='Output image filename (default: dat stem + .png, '
+                        'or .svg with --vector)')
+    p.add_argument('--dpi', type=int, default=None,
+                   help='Raster DPI for PNG output (default: 600). Lower is '
+                        'faster to render, e.g. --dpi 300. Ignored with --vector.')
+    p.add_argument('--vector', action='store_true',
+                   help='Write a resolution-independent SVG instead of PNG '
+                        '(faster and preferred for publication).')
     # --- physical model (what is plotted and under what conditions) ---
     p.add_argument('--temp', type=float, default=DEFAULT_TEMP,
                    help='Sample temperature in K for Bose-Einstein factor (default: 300.0 K)')
@@ -1013,6 +1080,8 @@ def main():
         # input / output
         dat_file=dat_file,
         out_png=args.out,
+        save_dpi=args.dpi,
+        vector=args.vector,
         # physical model
         raw_act=args.raw_act,
         temp=args.temp,

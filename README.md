@@ -173,8 +173,8 @@ The quadrature order is user-selectable (`--lebedev-order`), from odd integers
 `ORDER_TO_POINT_COUNT`):
 
 | order | 3 | 5 | 7 (default) | 9 | 11 | 13 | 15 (cap) |
-|-------|---|---|-------------|---|----|----|----------|
-| dirs  | 6 | 14 | 26 | 38 | 50 | 74 | 86 |
+| ------- | --- | --- | ------------- | --- | ---- | ---- | ---------- |
+| dirs | 6 | 14 | 26 | 38 | 50 | 74 | 86 |
 
 - order 3 → ±coordinate axes
 - order 5 → axes + body diagonals
@@ -470,11 +470,19 @@ python plot_raman.py --dat Na3PS4_Ca01-Cl06_E0.02.csv
 python plot_raman.py --dat Na3PS4_E0.02.csv --gamma 0.3 --freq-min 0 --freq-max 600
 python plot_raman.py --raw-act --temp 300 --laser-wl 632.8
 python plot_raman.py --title line1                    # formula line only
+python plot_raman.py --dat Na3PS4_Ca01-Cl06_E0.02.csv --vector   # fast, publication SVG
+python plot_raman.py --dat Na3PS4_Ca01-Cl06_E0.02.csv --dpi 300  # faster raster PNG
 ```
 
 By default the plot shows the physical **Stokes scattered intensity**
 `I(ν,T) ∝ (ν_L−ν)⁴/ν·[n(ν,T)+1]·A_s` at 300 K, 632.8 nm — use
 `--raw-act` for the unweighted Raman activity S(ν).
+
+> **Rendering speed.** The stick spectrum is drawn as a single vectorized
+> collection (not one line per mode), which keeps rendering fast even for large
+> multi-thousand-mode outputs. If you still want it faster or a print-ready
+> vector figure, use `--vector` (SVG) or `--dpi 300` — both render quicker than
+> the default 600-dpi PNG and are preferred for publication.
 
 ### 6 - Compare Multiple Compositions
 
@@ -596,7 +604,9 @@ Na3PS4_compare_abs.png     # absolute overlaid
 | Argument | Default | Description |
 | --- | --- | --- |
 | `--dat` | single CSV in cwd | Input CSV file |
-| `--out` | auto | Output PNG (defaults to CSV stem + .png) |
+| `--out` | auto | Output image path (defaults to CSV stem + .png, or .svg with `--vector`) |
+| `--dpi` | `600` | Raster resolution for PNG (lower renders faster, e.g. `300`; ignored with `--vector`) |
+| `--vector` | — | Write a resolution-independent SVG instead of PNG (faster, preferred for publication) |
 | `--raw-act` | — | Plot raw Raman activity S(ν) without 1/ν or thermal Bose factors |
 | `--temp` | `300.0` | Sample temperature in K (Bose-Einstein factor) |
 | `--laser-wl` | `632.8` | Excitation laser wavelength in nm |
