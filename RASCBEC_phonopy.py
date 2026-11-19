@@ -1,35 +1,62 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 r"""
 Title: Calculation of Raman Activities from VASP and Phonopy Output Files
 
-Automatic NAC extension: run with no arguments to detect nac_directions.json
-or 26 dirXX/direction.conf folders; otherwise retain original single-file mode.
-NAC outputs use the automatic _NAC suffix. No installer is required.
+Reads VASP/phonopy output and computes the Raman (Placzek) activity of each
+Gamma-point phonon mode via the RASCBEC method -- the born-effective-charge
+(BEC) field-derivative response convolved with the phonon eigenvectors.
+Two input modes are supported, selected automatically:
 
-Authors: Rui Zhang (original);
-Phani Ravi Teja Nunna (refactor and enhancements)
+  * Single mode -- a phonopy YAML at Gamma (qpoints.yaml, or mesh.yaml +
+    irreps.yaml) together with the eight finite-field OUTCAR BEC files.
+  * NAC multi-direction mode -- when nac_directions.json or dirXX/
+    direction.conf folders are present, the script instead performs a
+    Lebedev-Laikov quadrature (order 3/5/7/9, via scipy.integrate.
+    lebedev_rule) over the directional eigensystems and writes a weighted
+    spherical average. NAC outputs carry the automatic _NAC suffix.
+    No installer is required.
 
-Patches: auto atomic-mass lookup via pymatgen,
-variable mode count (filtered imaginary and acoustic modes),
-subdirectory-based OUTCAR paths (./1/OUTCAR, ./m1/OUTCAR, ...),
-chemistry-based output filenames derived from POSCAR composition,
-CSV metadata header (formula, dopants, file label, E-field),
-plot output option,
-auto-generated informative plot title,
-direct phonopy YAML input (qpoints.yaml or mesh.yaml + irreps.yaml),
-mode symmetry labels (irreps) in CSV and plot,
-temperature/laser-wavelength Stokes intensity options (--temp, --laser-wl),
-basis-group and dopant roles (--bas, --dops) with base-formula reconstruction,
-vectorised Raman activity loop via numpy einsum,
-reverse-scan OUTCAR BEC reader,
-automatic NAC multi-direction mode (26-point Lebedev rule) with weighted
-spherical averaging.
+Authors:
+  Rui Zhang               -- original RASCBEC method and script
+  Phani Ravi Teja Nunna   -- refactor and enhancements
 
-Date: 2025-04-28 (original); 2026-02-23 (patched); 2026-03-04 (chemistry naming);
-      2026-03-05 (YAML phonon input, irrep labels, vectorised activity loop,
-                  reverse-scan OUTCAR BEC reader); 2026-11-16 (--temp/--laser-wl,
-                  --bas/--dops roles, NAC multi-direction mode)
+Capabilities (beyond the original single-file tool):
+  * Auto atomic-mass lookup via pymatgen (no manual mass table)
+  * Variable mode count -- imaginary and acoustic modes filtered
+  * Subdirectory OUTCAR layout (./1/OUTCAR, ./m1/OUTCAR, ...)
+  * Chemistry-based output filenames derived from the POSCAR composition
+  * CSV metadata header (formula, dopants, file label, E-field)
+  * Plot output with an auto-generated informative title
+  * Direct phonopy YAML input (qpoints.yaml, or mesh.yaml + irreps.yaml)
+  * Phonon-mode symmetry labels (irreps) in the CSV and plot
+  * Temperature / laser-wavelength Stokes-intensity options (--temp, --laser-wl)
+  * Basis-group and dopant roles (--bas, --dops) with base-formula reconstruction
+  * Vectorised Raman-activity loop (numpy einsum)
+  * Reverse-scan OUTCAR BEC reader
+  * NAC multi-direction mode with Lebedev-Laikov quadrature and weighted
+    spherical averaging, C-accelerated YAML parsing (CSafeLoader, ~6x faster),
+    and a process-parallel direction loop (--jobs) with parallel BEC reads
+  * --lebedev-order: run a lower-order rule on the subset of the computed
+    directions (e.g. order 5 = 14 points from 26-point order-7 data); a
+    higher order than the data errors out (no silent fallback)
+  * Existing output files are always overwritten (no flag required)
+
+Date:
+  2025-04-28  original (Rui Zhang)
+  2026-02-23  refactor: pymatgen atomic masses, variable mode count,
+              subdirectory OUTCAR paths, chemistry-based output filenames,
+              CSV metadata header, plot option, informative plot title
+  2026-03-04  chemistry-based naming (dopant file labels)
+  2026-03-05  phonopy YAML input, irrep labels, vectorised activity loop,
+              reverse-scan OUTCAR BEC reader
+  2026-11-16  --temp/--laser-wl Stokes intensity, --bas/--dops roles,
+              NAC multi-direction mode
+  2026-11-18  C-accelerated YAML parsing, process-parallel --jobs loop with
+              parallel BEC reads, scipy-backed Lebedev-Laikov rule (order
+              3/5/7/9), --lebedev-order subset selection, always-overwrite
+              outputs
 
 License: GNU GENERAL PUBLIC LICENSE
 
@@ -37,31 +64,29 @@ Cite: Zhang, Rui, et al. "RASCBEC: Raman spectroscopy calculation
 via born effective charge." Computer Physics Communications 307 (2025): 109425
 
 Description:
-Reads VASP/phonopy output to calculate Raman activities per phonon mode
+Computes the Raman activity per phonon mode from VASP and phonopy output
 using the RASCBEC method.
 
-Required files (in working directory):
-POSCAR             -- structure file
-./1/OUTCAR         -- BEC, E-field along unrotated +
-./m1/OUTCAR        -- BEC, E-field along unrotated -
-./x/OUTCAR         -- BEC, E-field along +x (rotated along x)
-./mx/OUTCAR        -- BEC, E-field along -x
-./y/OUTCAR         -- BEC, E-field along +y (rotated along y)
-./my/OUTCAR        -- BEC, E-field along -y
-./z/OUTCAR         -- BEC, E-field along +z (rotated along z)
-./mz/OUTCAR        -- BEC, E-field along -z
-qpoints.yaml       -- phonopy phonon data at Gamma (or mesh.yaml, see --phonon-yaml)
-irreps.yaml        -- phonopy irreducible representations at Gamma
+Required files (in the working directory):
+  POSCAR             -- structure file
+  ./1/OUTCAR         -- BEC, E-field along unrotated +
+  ./m1/OUTCAR        -- BEC, E-field along unrotated -
+  ./x/OUTCAR         -- BEC, E-field along +x (rotated along x)
+  ./mx/OUTCAR        -- BEC, E-field along -x
+  ./y/OUTCAR         -- BEC, E-field along +y (rotated along y)
+  ./my/OUTCAR        -- BEC, E-field along -y
+  ./z/OUTCAR         -- BEC, E-field along +z (rotated along z)
+  ./mz/OUTCAR        -- BEC, E-field along -z
+  qpoints.yaml       -- phonopy phonon data at Gamma (or mesh.yaml, see --phonon-yaml)
+  irreps.yaml        -- phonopy irreducible representations at Gamma
 
-E-field magnitude is read automatically from ./1/OUTCAR (EFIELD_PEAD tag).
-Override with --E only if you want to force a specific value.
+E-field magnitude is read automatically from ./1/OUTCAR (EFIELD_PEAD tag);
+override with --E only to force a specific value.
 
 Output naming (chemistry-based, derived from POSCAR; no directory tags):
-<formula>[_<dopantpart>... ]_E<E>.csv / .png
-
-Examples:
-undoped Na3PS4, E=0.02  -> Na3PS4_E0.02.csv
-Ca+Cl co-doped Na3PS4   -> Na3PS4_Ca01-Cl06_E0.02.csv
+  <formula>[_<dopantpart>...]_E<E>.csv / .png
+  undoped Na3PS4, E=0.02  -> Na3PS4_E0.02.csv
+  Ca+Cl co-doped Na3PS4   -> Na3PS4_Ca01-Cl06_E0.02.csv
 
 Dopant roles (--bas / --dops)
 -----------------------------
@@ -70,18 +95,18 @@ Explicit --bas / --dops values take precedence over automatic inference
 When --bas is given, it defines the host-formula normalization AND the
 denominator for the dopant x-values (x = n_dopant / n_bas), e.g.
 Li5La9Ti16O48 --bas Ti -> Li0.31La0.56TiO3. When omitted, the
-least-abundant host species is used as the legacy reference.
+least-abundant host species is used as the reference.
 
---bas may also be a `+` joined group of species (e.g. --bas Ti+Ga). The
+--bas may also be a `+`-joined group of species (e.g. --bas Ti+Ga). The
 group's member counts are summed into a single reference, so the group is
 normalized to one and may include dopant species. For doped LLTO this
 normalizes the formula so Ti + Ga = 1 (e.g. Li60La90Ti150O360 with
---bas Ti+Ga -> Li0.38La0.56Ti0.94O2.25, and dopant x-values reported
+--bas Ti+Ga -> Li0.38La0.56Ti0.94O2.25, dopant x-values reported
 per 160 Ti+Ga sites).
 
 Base (undoped) formula
 -----------------------
-The stored/`# Formula` value is the BASE host composition, not the raw
+The stored / `# Formula` value is the BASE host composition, not the raw
 doped host-only count. The supercell contains only the host atoms that were
 NOT displaced, so the base is recovered by adding back the atoms each dopant
 took (or added) at every host element (see DOPANT_SUBSTITUTIONS), then
@@ -90,31 +115,40 @@ doped host counts are Na20P8S30 (Ca=1, Cl=2) is reported as the base
 Na3PS4, not Na2.5P1S3.75.
 
 CSV metadata header (parsed by compare_raman.py & plot_raman.py):
-# Formula: Na3PS4
-# Dopants: Ca=0.125 Cl=0.0625   <- omitted if undoped
-# File_Label: Ca01-Cl06         <- omitted if undoped
-# E_field: 0.02
-# Mode,Freq_cm-1,Activity,Irrep
-0001,<freq>,<activity>,A1
-...
+  # Formula: Na3PS4
+  # Dopants: Ca=0.125 Cl=0.0625   <- omitted if undoped
+  # File_Label: Ca01-Cl06         <- omitted if undoped
+  # E_field: 0.02
+  # Mode,Freq_cm-1,Activity,Irrep
+  0001,<freq>,<activity>,A1
+  ...
 
-Dependencies: argparse, pathlib, numpy, yaml, pymatgen, plot_raman
+Dependencies:
+  argparse, pathlib, numpy, yaml, pymatgen, plot_raman
+  (scipy for NAC multi-direction mode: scipy.integrate.lebedev_rule)
 
 Usage:
-python RASCBEC_phonopy.py                          # all defaults
-python RASCBEC_phonopy.py --E 0.02 --gamma 0.2
-python RASCBEC_phonopy.py --phonon-yaml mesh.yaml
-python RASCBEC_phonopy.py --irreps irreps.yaml
-python RASCBEC_phonopy.py --no-plot
-python RASCBEC_phonopy.py --freq-min 50 --freq-max 600
-python RASCBEC_phonopy.py --bas Ti+Ga --dops Y Ga   # doped LLTO, Ti+Ga = 1
-python RASCBEC_phonopy.py --help
+  python RASCBEC_phonopy.py                                # all defaults
+  python RASCBEC_phonopy.py --E 0.02 --gamma 0.2
+  python RASCBEC_phonopy.py --phonon-yaml mesh.yaml
+  python RASCBEC_phonopy.py --irreps irreps.yaml
+  python RASCBEC_phonopy.py --no-plot
+  python RASCBEC_phonopy.py --freq-min 50 --freq-max 600
+  python RASCBEC_phonopy.py --bas Ti+Ga --dops Y Ga        # doped LLTO, Ti+Ga = 1
+  python RASCBEC_phonopy.py --jobs 8                       # cap NAC parallelism at 8 workers
+  python RASCBEC_phonopy.py --lebedev-order 5              # NAC: order-5 rule (14 pts); from
+                                                           #   order-7 data this uses the 14
+                                                           #   order-5 directions and reweights
+  python RASCBEC_phonopy.py --help
+  (existing output files are always overwritten -- no flag required)
 """
 
 import argparse
+import os
 import numpy as np
 import re
 import yaml
+from concurrent.futures import ThreadPoolExecutor
 
 from pathlib import Path
 from pymatgen.core import Element
@@ -152,6 +186,28 @@ OUTCAR_MAP = {
     'z' : './z/OUTCAR',
     'mz': './mz/OUTCAR',
 }
+
+# ===========================================================================
+# 0. Fast YAML loading
+# ===========================================================================
+
+# yaml.safe_load() uses PyYAML's *pure-Python* SafeLoader, which is slow on
+# large files (tens of seconds per phonopy qpoints.yaml). CSafeLoader is the
+# C-accelerated equivalent (~6x faster; identical safe semantics -- no
+# arbitrary Python object construction). Note: even the C loader holds the GIL
+# for the whole parse, so parallelism across the NAC directions comes from
+# a *process* pool (see _nac_direction_worker), not threads.
+_YAML_LOADER = getattr(yaml, 'CSafeLoader', yaml.SafeLoader)
+
+def fast_yaml_load(stream):
+    """Parse a YAML file/stream using the C-accelerated loader when available.
+
+    Drop-in for ``yaml.safe_load`` but ~6x faster. Falls back to ``safe_load``
+    if the C extension is not built into this PyYAML installation.
+    """
+    if _YAML_LOADER is yaml.SafeLoader:
+        return yaml.safe_load(stream)
+    return yaml.load(stream, Loader=_YAML_LOADER)
 
 # ===========================================================================
 # I. Argument parser
@@ -211,8 +267,20 @@ def parse_args():
                    help='Multi-mode minimum retained frequency in THz (default: 0.1).')
     p.add_argument('--translation-overlap', type=float, default=0.95,
                    help='Exclude rigid translations by mass-weighted overlap in multi mode (default: 0.95).')
-    p.add_argument('--overwrite', action='store_true',
-                   help='Allow replacing existing multi-mode outputs; single-mode behavior unchanged.')
+    p.add_argument('--lebedev-order', dest='lebedev_order', type=int, default=None,
+                   help='NAC Lebedev-Laikov quadrature order (3, 5, 7, or 9 = 6/14/26/38 '
+                        'points, via scipy.integrate.lebedev_rule). Default auto: inferred '
+                        'from the discovered directions (6->3, 14->5, 26->7, 38->9). '
+                        'Setting a LOWER order than the data selects that rule\'s subset '
+                        'of the available directions and reweights to that order; setting a '
+                        'HIGHER order than the data errors out (those directions were not '
+                        'computed).')
+    # Outputs always overwrite existing files (no --overwrite / --no-overwrite flag).
+    p.add_argument('--jobs', type=int, default=None,
+                   help='Number of workers for the NAC direction loop (worker '
+                        'processes -- YAML parsing is CPU/GIL-bound) and BEC file '
+                        'reads. Default: auto (min(#directions, CPU count)); use '
+                        '--jobs 1 to force sequential processing.')
     return p.parse_args()
 
 # ===========================================================================
@@ -371,7 +439,15 @@ def get_charges_from_OUTCAR(outcar_path, nat):
             return charges
     raise ValueError(f"No BEC block found in {outcar_path}.")
 
-def load_bec_charges(outcar_map, nat):
+def _resolve_worker_count(requested, default):
+    """Resolve a --jobs value to a positive worker count (1 = sequential)."""
+    if requested is None:
+        return max(1, default)
+    if requested < 1:
+        raise ValueError('--jobs must be >= 1 (use --jobs 1 to force sequential processing).')
+    return requested
+
+def load_bec_charges(outcar_map, nat, jobs=None):
     """
     Read BEC tensors from all 8 finite-difference OUTCAR subdirectories.
 
@@ -379,20 +455,31 @@ def load_bec_charges(outcar_map, nat):
     The resulting dict is keyed by the same labels used in OUTCAR_MAP
     and later consumed by build_charge_derivatives().
 
+    The reads are I/O bound, so they are executed on a thread pool when
+    ``jobs`` > 1. The returned dict preserves the insertion order of
+    ``outcar_map`` regardless of worker completion order.
+
     Parameters
     ----------
     outcar_map : dict -- {label: path} as in OUTCAR_MAP
     nat        : int  -- number of atoms
+    jobs       : int or None -- worker threads (None -> 1, i.e. sequential)
 
     Returns
     -------
     charges : dict[str, list[nat x 3 x 3]] -- BEC tensors keyed by direction label
     """
-    charges = {}
-    for key, path in outcar_map.items():
+    def _read(key_path):
+        key, path = key_path
         print(f"  Reading BEC: {path}")
-        charges[key] = get_charges_from_OUTCAR(path, nat)
-    return charges
+        return key, get_charges_from_OUTCAR(path, nat)
+
+    items = list(outcar_map.items())
+    if jobs is None or jobs <= 1 or len(items) <= 1:
+        return dict(_read(item) for item in items)
+    workers = min(_resolve_worker_count(jobs, 1), len(items))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return dict(pool.map(_read, items))
 
 # ===========================================================================
 # IV. BEC derivative tensor
@@ -521,12 +608,12 @@ def load_phonon_data(yaml_file='qpoints.yaml', irreps_file='irreps.yaml',
     irrep_labels : list[str]              -- symmetry label per retained mode
     """
     with open(yaml_file, 'r') as fh:
-        ydata = yaml.safe_load(fh)
+        ydata = fast_yaml_load(fh)
 
     band_to_irrep = {}
     if irreps_file and Path(irreps_file).exists():
         with open(irreps_file, 'r') as fh:
-            idata = yaml.safe_load(fh)
+            idata = fast_yaml_load(fh)
         for nm in idata.get('normal_modes', []):
             label = nm.get('ir_label', None)
             for idx in nm.get('band_indices', []):
@@ -626,7 +713,9 @@ def compute_raman_activities(dq, eigvecs, nat, n_modes, atomic_mass, species_n):
     mass_list = np.repeat(atomic_mass, species_n.astype(int))   # (nat,)
     mass_T    = np.tile(mass_list, (3, 1)).T                    # (nat, 3)
 
-    dq_arr = np.array(dq)   # (nat, 3, 3, 3), indices: t, i, k, j
+    # asarray (not array) so a precomputed ndarray is used in place rather
+    # than re-copied on every per-direction call in the multi-direction loop.
+    dq_arr = np.asarray(dq)   # (nat, 3, 3, 3), indices: t, i, k, j
 
     # eigvecs: (3*nat, n_modes) -> (n_modes, nat, 3), then mass-weighted
     eigvecs_mw = (eigvecs.T.reshape(n_modes, nat, 3)
@@ -1050,7 +1139,7 @@ def main_single(args):
 
     # --- 4. Born Effective Charges ---
     print("\nLoading BEC tensors ...")
-    charges = load_bec_charges(OUTCAR_MAP, nat)
+    charges = load_bec_charges(OUTCAR_MAP, nat, jobs=args.jobs)
 
     # --- 5. BEC derivatives ---
     dq = build_charge_derivatives(charges, nat, E)
@@ -1120,6 +1209,52 @@ def _nac_config_direction(directory):
     return q
 
 
+def _lebedev_points(order):
+    """Return (points, weights) for a Lebedev-Laikov quadrature of *order*.
+
+    points  : ndarray (3, m) -- unit direction vectors, all octants signed
+    weights : ndarray (m,)   -- normalized to sum to 1 (for the spherical avg)
+
+    Delegates to ``scipy.integrate.lebedev_rule`` (Parrish getLebedevSphere),
+    so the node set is no longer hand-coded. Supported orders: 3, 5, 7, 9,
+    11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 35, 41, 47, 53, 59, 65, 71,
+    77, 83, 89, 95, 101, 107, 113, 119, 125, 131 (point counts 6, 14, 26,
+    38, 50, ...). Order 7 is the classic 26-point rule.
+    """
+    try:
+        from scipy.integrate import lebedev_rule
+    except ImportError as exc:
+        raise ImportError(
+            'scipy is required for NAC multi-direction mode '
+            '(scipy.integrate.lebedev_rule). Install scipy, or pin the rule '
+            'you already have via nac_directions.json.') from exc
+    try:
+        x, w = lebedev_rule(int(order))
+    except NotImplementedError as exc:
+        raise ValueError(
+            f'Lebedev order {order!r} not available via scipy; supported orders '
+            'are 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 35, '
+            '41, 47, 53, 59, 65, 71, 77, 83, 89, 95, 101, 107, 113, 119, 125, 131.') from exc
+    x = np.asarray(x, dtype=float)
+    w = np.asarray(w, dtype=float)
+    x = x / np.linalg.norm(x, axis=0, keepdims=True)
+    w = w / w.sum()
+    return x, w
+
+
+def _lebedev_subset(lo, hi):
+    """True if every point of the order-`lo` rule lies in the order-`hi` rule.
+
+    Lower-order Lebedev-Laikov rules are generally geometric subsets of higher
+    ones, but NOT contiguously: e.g. order 7 (26 pts) is NOT a subset of order
+    9 (38 pts), while orders 3 and 5 are. Used to validate a --lebedev-order
+    that is lower than the data's own order.
+    """
+    lx, _ = _lebedev_points(lo)
+    hx, _ = _lebedev_points(hi)
+    return all(any(np.allclose(lx[:, i], hx[:, j], atol=1e-7) for j in range(hx.shape[1]))
+               for i in range(lx.shape[1]))
+
 def _nac_discover(args):
     import json, sys
     explicit_single = any(x == '--phonon-yaml' or x.startswith('--phonon-yaml=') for x in sys.argv[1:])
@@ -1154,15 +1289,50 @@ def _nac_discover(args):
         root = Path.cwd()
         for directory in dirs:
             q = _nac_config_direction(directory)
-            cart = q @ np.linalg.inv(lattice).T
-            cart /= np.linalg.norm(cart)
-            count = int(np.count_nonzero(np.abs(cart) > 1e-7))
             rows.append({'directory': directory.name, 'yaml': f'{directory.name}/qpoints.yaml',
-                         'q_direction': q.tolist(), 'weight': {1:1/21, 2:4/105, 3:9/280}[count]})
-    if len(rows) != 26:
-        raise ValueError(f'Expected the complete 26-point rule; found {len(rows)}. No silent fallback to single mode.')
-    import itertools
-    expected = [np.array(v)/np.linalg.norm(v) for v in itertools.product((-1,0,1), repeat=3) if any(v)]
+                         'q_direction': q.tolist(), 'weight': None})
+    # Determine the order of the data on disk (from its direction count) and
+    # the order to actually use. Auto = the disk order. An explicit
+    # --lebedev-order LOWER than the disk order selects that rule's subset of
+    # the available directions (lower-order Lebedev rules are geometric
+    # subsets of higher-order ones, verified against scipy's node sets).
+    # Requesting a HIGHER order than the disk order errors out, because those
+    # extra directions were never computed (no silent fallback to single mode).
+    point_count_to_order = {6: 3, 14: 5, 26: 7, 38: 9}
+    order_to_point_count = {3: 6, 5: 14, 7: 26, 9: 38}
+    data_order = point_count_to_order.get(len(rows))
+    if data_order is None:
+        raise ValueError(
+            f'Found {len(rows)} NAC directions; expected a complete Lebedev rule '
+            '(6/14/26/38 directions -> order 3/5/7/9). Use --lebedev-order to '
+            'specify other point counts explicitly.')
+    order = args.lebedev_order if args.lebedev_order is not None else data_order
+    if order not in order_to_point_count:
+        raise ValueError(
+            f'--lebedev-order {order} is not supported; supported orders are '
+            '3, 5, 7, 9 (point counts 6, 14, 26, 38).')
+    if order > data_order:
+        raise ValueError(
+            f'--lebedev-order {order} needs {order_to_point_count[order]} '
+            f'directions, but only {len(rows)} (order {data_order}) are present. '
+            f'Run phonopy for all {order_to_point_count[order]} directions first '
+            '(no silent fallback to single mode).')
+    if order < data_order:
+        # Only valid when the lower-order rule is a true geometric subset of the
+        # data order. Containment is not contiguous (order 7 is NOT a subset of
+        # order 9), so check explicitly before selecting.
+        if not _lebedev_subset(order, data_order):
+            valid = [lo for lo in (3, 5, 7, 9) if lo < data_order and _lebedev_subset(lo, data_order)]
+            raise ValueError(
+                f'--lebedev-order {order} is not a subset of the order-{data_order} '
+                f'data ({len(rows)} dirs). Lower orders selectable from order '
+                f'{data_order} data: {", ".join(map(str, valid)) if valid else "none"}.')
+        print(f'Lebedev order: data is order {data_order} ({len(rows)} dirs); '
+              f'using the order-{order} subset '
+              f'({order_to_point_count[order]} of {len(rows)} dirs).')
+    # Validate every on-disk direction against the disk-order rule. Weights are
+    # re-assigned from the *target* order below when a subset is selected.
+    expected_x, expected_w = _lebedev_points(data_order)   # (3, m) points, (m,) weights
     used = set(); paths = set(); validated = []
     for row in rows:
         path = (root / row.get('yaml', str(Path(row['directory'])/'qpoints.yaml'))).resolve()
@@ -1178,14 +1348,19 @@ def _nac_discover(args):
         if q.shape != (3,) or not np.isfinite(q).all() or np.linalg.norm(q)==0:
             raise ValueError(f'Invalid direction: {path}')
         cart = q @ np.linalg.inv(lattice).T; cart /= np.linalg.norm(cart)
-        matches = [i for i,v in enumerate(expected) if np.allclose(v,cart,atol=1e-7)]
-        if len(matches)!=1 or matches[0] in used:
+        matches = [i for i in range(len(expected_w)) if np.allclose(expected_x[:, i], cart, atol=1e-7)]
+        if len(matches) != 1 or matches[0] in used:
             raise ValueError(f'Duplicate/non-Lebedev physical direction: {path}')
-        used.add(matches[0])
-        w = float(row['weight'])
-        required = {1:1/21,2:4/105,3:9/280}[int(np.count_nonzero(np.abs(cart)>1e-7))]
-        if not np.isfinite(w) or not np.isclose(w,required,atol=1e-12,rtol=0):
-            raise ValueError(f'Incorrect degree-7 Lebedev weight: {path}')
+        idx = matches[0]
+        used.add(idx)
+        # Weight must match the scipy rule for this node (manifest may carry it;
+        # config-folder discovery resolves it here from the expected set).
+        w = row['weight']
+        required = float(expected_w[idx])
+        if w is None:
+            w = required
+        if not np.isfinite(w) or not np.isclose(w, required, atol=1e-12, rtol=0):
+            raise ValueError(f'Incorrect Lebedev (order {order}) weight: {path}')
         conf = path.parent/'direction.conf'
         if conf.exists():
             qc = _nac_config_direction(path.parent)
@@ -1195,9 +1370,27 @@ def _nac_discover(args):
             raise ValueError(f'Manifest Cartesian direction mismatch: {path}')
         validated.append({'directory':row.get('directory',path.parent.name),'path':path,
                           'weight':w,'cartesian':cart.tolist(),'q_direction':q.tolist()})
+    if order < data_order:
+        # Select the directions that form the lower-order rule and reweight them
+        # to that order's weights (lower-order Lebedev rules are geometric
+        # subsets of the data order; weights are NOT simply scaled down).
+        target_x, target_w = _lebedev_points(order)
+        selected = []
+        for r in validated:
+            cart = np.asarray(r['cartesian'], dtype=float)
+            idx = [i for i in range(len(target_w)) if np.allclose(target_x[:, i], cart, atol=1e-7)]
+            if len(idx) != 1:
+                continue                       # not a member of the target rule
+            r['weight'] = float(target_w[idx[0]])
+            selected.append(r)
+        if len(selected) != len(target_w):
+            raise ValueError(
+                f'Order {order} needs {len(target_w)} directions but only '
+                f'{len(selected)} of the order-{data_order} data match it.')
+        validated = selected
     if not np.isclose(sum(r['weight'] for r in validated),1,atol=1e-12,rtol=0):
         raise ValueError('Weights do not sum to one.')
-    return validated
+    return validated, order
 
 
 def _nac_load_direction(row, structure, masses, args):
@@ -1209,7 +1402,7 @@ def _nac_load_direction(row, structure, masses, args):
         if recorded and recorded != hashlib.sha256(path.read_bytes()).hexdigest():
             raise ValueError(f'YAML checksum mismatch: {path}')
     with path.open() as f:
-        data = yaml.safe_load(f)
+        data = fast_yaml_load(f)
     points = data.get('phonon',[])
     if len(points)!=1 or not np.allclose(points[0].get('q-position',[99]*3),0,atol=1e-10):
         raise ValueError(f'Expected one Gamma point: {path}')
@@ -1265,17 +1458,46 @@ def _nac_load_direction(row, structure, masses, args):
     return np.array(frequencies),np.column_stack(vectors),indices,skipped
 
 
-def _nac_write_outputs(path, chem, E, records, directions, skipped, args):
+def _nac_direction_worker(payload):
+    """Process one NAC direction: load its YAML, compute activities, emit records.
+
+    Module-level (not a closure) so it is picklable and can run in a
+    ``ProcessPoolExecutor`` -- required because YAML parsing is GIL-bound and
+    cannot be parallelized with threads. All inputs and outputs are plain
+    picklable objects (dicts, ndarrays, ``argparse.Namespace``, a pymatgen
+    ``Structure``), so the per-direction state needs no cross-process
+    coordination.
+
+    Parameters
+    ----------
+    payload : tuple
+        (row, structure, masses, args, dq, atomic_mass, species_n, nat)
+
+    Returns
+    -------
+    tuple (records, rejected) -- both JSON/pickle-serializable.
+    """
+    row, structure, masses, args, dq, atomic_mass, species_n, nat = payload
+    freqs, vecs, indices, rejected = _nac_load_direction(row, structure, masses, args)
+    raw = np.asarray(compute_raman_activities(dq, vecs, nat, len(freqs), atomic_mass, species_n))
+    if not np.isfinite(raw).all() or (raw < 0).any():
+        raise ValueError('Invalid Raman activity.')
+    records = [{'direction': row['directory'], 'source_mode': index,
+                'frequency_cm1': float(freq), 'weight': row['weight'],
+                'raw_activity': float(activity),
+                'weighted_activity': float(activity * row['weight'])}
+               for freq, activity, index in zip(freqs, raw, indices)]
+    return records, rejected
+
+
+def _nac_write_outputs(path, chem, E, records, directions, skipped, args, order):
     import json, os, tempfile
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
     audit=path.with_suffix('.directions.json')
-    if not args.overwrite:
-        for candidate in (path,audit):
-            if candidate.exists(): raise FileExistsError(f'{candidate} exists; use --overwrite to replace deliberately.')
     lines=[f"# Formula: {chem['formula']}"]
     if chem['dopants'] and chem['dopants']!='Undoped': lines.append(f"# Dopants: {chem['dopants']}")
     if chem['file_label']: lines.append(f"# File_Label: {chem['file_label']}")
-    lines += [f'# E_field: {E:g}', '# Phonon_treatment: NAC_Lebedev26',
+    lines += [f'# E_field: {E:g}', f'# Phonon_treatment: NAC_Lebedev_order{order}',
               '# Activity_semantics: quadrature_weight_times_raw_Placzek_activity',
               '# Row_semantics: directional_sticks_not_unique_modes',
               '# Mode,Freq_cm-1,Activity,Irrep']
@@ -1283,6 +1505,7 @@ def _nac_write_outputs(path, chem, E, records, directions, skipped, args):
         r['output_row']=i
         lines.append(f"{i:06d},{r['frequency_cm1']:.12g},{r['weighted_activity']:.12g},")
     details={'treatment':'NAC modes with fixed-field RASCBEC response; no extra electro-optic correction',
+             'lebedev_order':order,'n_directions':len(directions),
              'minimum_frequency_thz':args.nac_min_thz,'translation_overlap_threshold':args.translation_overlap,
              'directions':[{**r,'path':str(r['path'])} for r in directions],
              'skipped_modes':skipped,'sticks':records}
@@ -1296,9 +1519,10 @@ def _nac_write_outputs(path, chem, E, records, directions, skipped, args):
 
 def main():
     args=parse_args()
-    directions=_nac_discover(args)
-    if directions is None:
+    discovered=_nac_discover(args)
+    if discovered is None:
         return main_single(args)
+    directions, order=discovered
     if args.nac_min_thz<0 or not np.isfinite(args.nac_min_thz):
         raise ValueError('--nac-min-thz must be finite and nonnegative.')
     if not 0<args.translation_overlap<=1:
@@ -1311,29 +1535,53 @@ def main():
     base=raman_filename(chem,E)+'_NAC'
     out_csv=Path(args.out_csv or f'{base}.csv')
     out_png=Path(args.out_png or out_csv.with_suffix('.png'))
-    targets=[out_csv,out_csv.with_suffix('.directions.json')]+([] if args.no_plot else [out_png])
-    if not args.overwrite:
-        for path in targets:
-            if path.exists(): raise FileExistsError(f'{path} exists. Use --overwrite for an intentional rerun.')
-    print(f'Input   : automatic NAC multi-direction mode ({len(directions)} directions)')
+    # Outputs are always overwritten; existing files are replaced in place.
+    print(f'Input   : automatic NAC multi-direction mode ({len(directions)} directions, Lebedev order {order})')
     print(f'Output  : {out_csv}')
     print('Loading the eight BEC files once ...')
-    charges=load_bec_charges(OUTCAR_MAP,nat)
-    dq=build_charge_derivatives(charges,nat,E)
+    charges=load_bec_charges(OUTCAR_MAP,nat,jobs=args.jobs)
+    # Materialize the per-atom derivative tensor once; every direction reuses
+    # the same array (compute_raman_activities no longer copies it).
+    dq=np.asarray(build_charge_derivatives(charges,nat,E))
     masses=np.repeat(atomic_mass,species_n.astype(int))
+
+    # Each direction is an independent (YAML load + einsum) unit of work.
+    # YAML parsing is GIL-bound (even the C loader holds the GIL), so a thread
+    # pool gives NO speedup -- we use a *process* pool for true parallelism.
+    # Every worker input is picklable; _nac_direction_worker is a module-level
+    # function so it pickles cleanly for the process pool.
+    payloads=[(row,structure,masses,args,dq,atomic_mass,species_n,nat) for row in directions]
+    # auto = min(#directions, CPU count): never spawn more workers than there
+    # are CPUs, and never more than there are directions. (Use --jobs to
+    # override, e.g. --jobs <physical-cores> for the CPU-bound YAML-parse
+    # optimum on hyperthreaded machines.)
+    workers=_resolve_worker_count(args.jobs,min(len(directions),os.cpu_count() or 1))
+    if workers>1 and len(directions)>1:
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+        # Python 3.14 defaults to 'forkserver', which re-imports this whole
+        # module (numpy + pymatgen) into every worker and swamps the work.
+        # 'fork' copies the already-loaded module in place (no re-import) and
+        # is safe here: all BEC threads have finished before this point and no
+        # other threads are running at fork time.
+        try:
+            mp_context = mp.get_context('fork')
+        except ValueError:
+            mp_context = None
+        print(f'Processing {len(directions)} NAC directions on {workers} worker processes ...')
+        with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context) as pool:
+            results=list(pool.map(_nac_direction_worker,payloads))
+    else:
+        print(f'Processing {len(directions)} NAC direction(s) sequentially ...')
+        results=[_nac_direction_worker(p) for p in payloads]
+
     records=[];skipped={}
-    for row in directions:
-        freqs,vecs,indices,rejected=_nac_load_direction(row,structure,masses,args)
-        raw=np.asarray(compute_raman_activities(dq,vecs,nat,len(freqs),atomic_mass,species_n))
-        if not np.isfinite(raw).all() or (raw<0).any(): raise ValueError('Invalid Raman activity.')
-        for freq,activity,index in zip(freqs,raw,indices):
-            records.append({'direction':row['directory'],'source_mode':index,'frequency_cm1':float(freq),
-                            'weight':row['weight'],'raw_activity':float(activity),
-                            'weighted_activity':float(activity*row['weight'])})
+    for row,(rec,rejected) in zip(directions,results):
+        records.extend(rec)
         skipped[row['directory']]=rejected
-        print(f"  {row['directory']}: {len(freqs)} retained, {len(rejected)} excluded")
+        print(f"  {row['directory']}: {len(rec)} retained, {len(rejected)} excluded")
     records.sort(key=lambda r:r['frequency_cm1'])
-    _nac_write_outputs(out_csv,chem,E,records,directions,skipped,args)
+    _nac_write_outputs(out_csv,chem,E,records,directions,skipped,args,order)
     if not args.no_plot:
         out_png.parent.mkdir(parents=True,exist_ok=True)
         title=build_raman_title(chem,E,args.gamma*THZCM1,args.temp,suffix='NAC, spherical average')
