@@ -632,7 +632,6 @@ def build_plot_title(all_meta, files, args, gamma):
                 gamma=gamma,
                 temp=args.temp,
                 raw_act=args.raw_act,
-                suffix="Comparison",
                 show_legend=False,
             )
         else:

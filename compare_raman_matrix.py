@@ -736,7 +736,6 @@ def build_plot_title(samples, a, gamma):
             gamma=gamma,
             temp=a.temp,
             raw_act=a.raw_act,
-            suffix="Comparison",
             show_legend=False,
         )
     else:

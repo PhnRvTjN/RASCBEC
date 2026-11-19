@@ -524,14 +524,13 @@ def build_raman_title(
     gamma: float,
     temp: float,
     raw_act: bool = False,
-    suffix: str = "Raman",
     show_legend: bool = True,
 ) -> str:
     """
     Build a two-line Raman plot title.
 
-    Line 1: bold doped formula (mathtext) + ``suffix`` + dopant-fraction legend
-            (e.g. ``Na₃₋₂ₓ₋ᵧCaₓPS₄₋ᵧClᵧ Raman | x=0.125 y=0.0625``).
+    Line 1: bold doped formula (mathtext) + dopant-fraction legend
+            (e.g. ``Na₃₋₂ₓ₋ᵧCaₓPS₄₋ᵧClᵧ | x=0.125 y=0.0625``).
     Line 2: run parameters — E, FWHM, T (or S(ν) when ``raw_act=True``).
 
     Parameters
@@ -547,9 +546,6 @@ def build_raman_title(
         Sample temperature in K.
     raw_act : bool, optional
         If True, show ``S(ν)`` instead of temperature in line 2.
-    suffix       : str, optional
-        Text following the formula on line 1 (default ``"Raman"``; use
-        ``"Raman Comparison"`` for multi-spectrum figures).
     show_legend  : bool, optional
         If True (default), append the ``x=…, y=…`` dopant-fraction legend to
         line 1. Set False when the per-trace labels already carry the
@@ -572,13 +568,14 @@ def build_raman_title(
             except ValueError:
                 pass
 
-    # Line 1: formula + suffix (+ legend when enabled)
+    # Line 1: formula (+ legend when enabled). No trailing "Raman"/"Comparison"
+    # suffix word -- the formula (and dopant-fraction legend) is the title.
     if dopant_pairs:
         dop_species   = [sp for sp, _ in dopant_pairs]
         dop_fractions = {sp: val for sp, val in dopant_pairs}
         formula_str = _build_symbolic_formula_mathtext(
             chem['formula'], dop_species, dop_fractions)
-        line1 = f"${formula_str}$  {suffix}"
+        line1 = f"${formula_str}$"
         if show_legend:
             legend = " ".join(
                 f"{letters[i]}={dop_fractions[sp]:.2f}"
@@ -590,10 +587,9 @@ def build_raman_title(
         # plain text and dropped the subscripts.
         formula = chem.get('formula') or ''
         if formula:
-            line1 = (f"${_build_symbolic_formula_mathtext(formula, [], {})}$"
-                     f"  {suffix}")
+            line1 = f"${_build_symbolic_formula_mathtext(formula, [], {})}$"
         else:
-            line1 = f"  {suffix}"
+            line1 = ""
 
     # Line 2: parameters
     line2_parts = []
@@ -606,7 +602,8 @@ def build_raman_title(
         line2_parts.append(f"T = {temp:g} K")
     line2 = "  |  ".join(line2_parts)
 
-    return f"{line1}\n{line2}"
+    # No formula (and no legend) -> line 1 is empty; fall back to line 2 alone.
+    return line2 if not line1.strip() else f"{line1}\n{line2}"
 
 
 def _build_plot_title_from_csv(

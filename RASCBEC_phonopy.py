@@ -1621,7 +1621,7 @@ def main():
     _nac_write_outputs(out_csv,chem,E,records,directions,skipped,args,order)
     if not args.no_plot:
         out_png.parent.mkdir(parents=True,exist_ok=True)
-        title=build_raman_title(chem,E,args.gamma*THZCM1,args.temp,suffix='NAC, spherical average')
+        title=build_raman_title(chem,E,args.gamma*THZCM1,args.temp)
         plot_raman_spectrum(dat_file=out_csv,out_png=out_png,gamma=args.gamma*THZCM1,
             freq_min=args.freq_min,freq_max=args.freq_max,sticks=not args.no_sticks,
             n_labels=args.n_labels,title=title,temp=args.temp,laser_wl=args.laser_wl)
