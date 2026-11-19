@@ -514,8 +514,12 @@ def resolve_thread_count(requested, workers, cores):
     return requested
 
 
-def _fmt3(vec):
-    """Format a 3-vector compactly for log lines, e.g. ``[ 0.000  1.000  0.000]``."""
+def fmt3(vec):
+    """Format a 3-vector compactly for log lines, e.g. ``[ 0.000  1.000  0.000]``.
+
+    Public so that ``RASCBEC_phonopy.py`` can reuse the identical formatting
+    (see :class:`Progress`) and the two scripts' per-direction lines read alike.
+    """
     return '[' + ' '.join(f'{x:8.5f}' for x in vec) + ']'
 
 
@@ -528,12 +532,15 @@ def _direction_label(directory, row):
     """
     if not row:
         return f'{directory}'
-    return (f'{directory}  cart={_fmt3(row["cartesian"])} '
-            f'q_dir={_fmt3(row["q_direction"])}  w={row["weight"]:.6f}')
+    return (f'{directory}  cart={fmt3(row["cartesian"])} '
+            f'q_dir={fmt3(row["q_direction"])}  w={row["weight"]:.6f}')
 
 
-class _Progress:
+class Progress:
     """Live single-line progress bar (on a TTY) or plain per-item lines (piped).
+
+    Public so that ``RASCBEC_phonopy.py`` reuses the exact same bar (see its
+    NAC direction loop) and the two scripts' terminal output stays consistent.
 
     Each :meth:`tick` advances the count, logs the current direction, and
     redraws the bar on the last line so the bar always sits at the bottom and
@@ -612,7 +619,7 @@ def run_directions(payloads, jobs, threads=None, info=None):
     print(f'  parallelism: {mode}, {tshow}, {cores} core(s) '
           f'(workers x threads = {workers} x {tcap or cores})', flush=True)
     payloads = [(w, e, n, tcap) for (w, e, n) in payloads]
-    progress = _Progress(len(payloads))
+    progress = Progress(len(payloads))
 
     def _label(res):
         return _direction_label(res['directory'], info.get(res['directory']))

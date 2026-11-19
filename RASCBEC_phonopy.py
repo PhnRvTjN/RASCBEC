@@ -1546,9 +1546,26 @@ def main():
     # override, e.g. --jobs <physical-cores> for the CPU-bound YAML-parse
     # optimum on hyperthreaded machines.)
     workers=_resolve_worker_count(args.jobs,min(len(directions),os.cpu_count() or 1))
+
+    def _line(row, rec, rejected):
+        # One streamed line per direction: folder, cartesian unit vector, the
+        # phonopy Q_DIRECTION, the weight, and how many modes were kept/excluded.
+        # Reuses gen_nac.fmt3 / gen_nac.Progress so the two scripts read alike.
+        parts=[row['directory']]
+        if row.get('cartesian') is not None:
+            parts.append(f'cart={nq.fmt3(row["cartesian"])}')
+        if row.get('q_direction') is not None:
+            parts.append(f'q_dir={nq.fmt3(row["q_direction"])}')
+        w=row.get('weight')
+        parts.append(f'w={w:.6f}' if isinstance(w,(int,float)) else 'w=-')
+        parts.append(f'kept={len(rec)}  exc={len(rejected)}')
+        return '  '.join(parts)
+
+    progress=nq.Progress(len(payloads))
+    errors={}
     if workers>1 and len(directions)>1:
         import multiprocessing as mp
-        from concurrent.futures import ProcessPoolExecutor
+        from concurrent.futures import ProcessPoolExecutor, as_completed
         # Python 3.14 defaults to 'forkserver', which re-imports this whole
         # module (numpy + pymatgen) into every worker and swamps the work.
         # 'fork' copies the already-loaded module in place (no re-import) and
@@ -1558,18 +1575,48 @@ def main():
             mp_context = mp.get_context('fork')
         except ValueError:
             mp_context = None
-        print(f'Processing {len(directions)} NAC directions on {workers} worker processes ...')
+        print(f'Processing {len(directions)} NAC directions on {workers} worker processes ...', flush=True)
+        # Each worker returns (records, rejected); slots start as None until
+        # their future completes, so the element type must allow None.
+        results: list[tuple[list[dict], list] | None] = [None]*len(payloads)
+        errors={}
         with ProcessPoolExecutor(max_workers=workers, mp_context=mp_context) as pool:
-            results=list(pool.map(_nac_direction_worker,payloads))
+            fut_to_idx={pool.submit(_nac_direction_worker,p):i for i,p in enumerate(payloads)}
+            for fut in as_completed(fut_to_idx):
+                i=fut_to_idx[fut]
+                row=directions[i]
+                try:
+                    res=fut.result()
+                except Exception as exc:  # noqa: BLE001 -- stream, then report
+                    errors[i]=exc
+                    progress.tick(_line(row, [], [])+f'  ERROR: {exc!r}')
+                else:
+                    results[i]=res
+                    progress.tick(_line(row, res[0], res[1]))
+        progress.finish()
     else:
-        print(f'Processing {len(directions)} NAC direction(s) sequentially ...')
-        results=[_nac_direction_worker(p) for p in payloads]
+        print(f'Processing {len(directions)} NAC direction(s) sequentially ...', flush=True)
+        results=[]
+        for p in payloads:
+            res=_nac_direction_worker(p)
+            results.append(res)
+            progress.tick(_line(directions[len(results)-1], res[0], res[1]))
+        progress.finish()
 
+    # A single failing direction aborts the weighted average (it needs every
+    # direction), so surface all failures, then exit non-zero.
+    if errors:
+        for i, exc in sorted(errors.items()):
+            print(f'FAILED {directions[i]["directory"]}: {exc!r}', flush=True)
+        raise SystemExit(f'{len(errors)} direction(s) failed; see messages above.')
+
+    # All directions succeeded (a failure raises SystemExit above), so no slot
+    # is None; materialize a non-Optional list to satisfy the type checker.
+    completed=[r for r in results if r is not None]
     records=[];skipped={}
-    for row,(rec,rejected) in zip(directions,results):
+    for row,(rec,rejected) in zip(directions,completed):
         records.extend(rec)
         skipped[row['directory']]=rejected
-        print(f"  {row['directory']}: {len(rec)} retained, {len(rejected)} excluded")
     records.sort(key=lambda r:r['frequency_cm1'])
     _nac_write_outputs(out_csv,chem,E,records,directions,skipped,args,order)
     if not args.no_plot:
