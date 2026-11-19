@@ -29,7 +29,7 @@
 | Plot titles | None | Auto-generated two-line title: bold mathtext formula (e.g. `Na₃₋₂ₓ₋ᵧCaₓPS₄₋ᵧClᵧ` + `x=…, y=…` legend) / run parameters (E, FWHM, T) |
 | Plot generation | Not included | Integrated via `plot_raman.py` (Lorentzian broadening, prominence-based peak labels with irreps, two-line auto title) |
 | Comparison plots | Not included | `compare_raman.py` — waterfall / overlaid, absolute or normalised, shared physical model; `compare_raman_matrix.py` — two-dopant composition matrix (`x` × `y` grid of shared-scale panels) |
-| NAC multi-direction | Not included | `RASCBEC_phonopy.py` auto-detects NAC setups (`nac_directions.json` or 26 `dirNN/direction.conf` folders), validates the full 26-point Lebedev rule (directions, duplicate detection, weights `1/21, 4/105, 9/280`), and emits Lebedev-weighted directional sticks with a JSON provenance audit file |
+| NAC multi-direction | Not included | `RASCBEC_phonopy.py` auto-detects NAC setups (`nac_directions.json` or `dirNN/direction.conf` folders), validates the complete Lebedev rule (any `scipy.integrate.lebedev_rule` order — order 3 = 6 directions up to order 15 = 86; weights `1/21, 4/105, 9/280` for the order-7 default), and emits Lebedev-weighted directional sticks with a JSON provenance audit file. Setups are scaffolded by `gen_nac.py`, which is the single source of truth for the shared quadrature |
 | CLI arguments | None | `--E`, `--gamma` (THz), `--temp`, `--laser-wl`, `--freq-min/max`, `--phonon-yaml`, `--irreps`, `--bas`, `--dops`, `--no-plot`, `--out-csv/png`, … |
 | Code structure | Single monolithic script | Modular functions (BEC reader, derivative builder, activity calculator, writer) shared across both phonon variants; common plotting primitives in `plot_raman.py` |
 
@@ -149,26 +149,83 @@ with a shared, validated set of role-resolution rules:
 ## Automatic NAC Multi-Direction Mode (phonopy variant)
 
 `RASCBEC_phonopy.py` supports a **fixed-field NAC (non-analytic
-correction) workflow** with automatic spherical averaging. Run it with no
-arguments and it looks for one of:
+correction) workflow** with automatic spherical averaging.
 
-- `nac_directions.json` — a manifest of the 26 NAC directions, or
-- 26 sibling folders named `dir01` … `dir26`, each containing a
-  `direction.conf` (with `NAC = .TRUE.` and `Q_DIRECTION`) and a
-  `qpoints.yaml`.
+### Scaffolding the direction runs — `gen_nac.py`
+
+`gen_nac.py` (run from `Project/04_phon/<composition>`) scaffolds one
+self-contained phonopy project per NAC direction under
+`Project/05_rascbec/<composition>/`, each containing symlinks to the shared
+inputs, a `direction.conf` (`NAC = .TRUE.` + `Q_DIRECTION`), and — after the
+phonopy run — `qpoints.yaml`. It writes the `nac_directions.json` manifest and
+runs the independent per-direction phonopy jobs in parallel (`--jobs`; auto =
+min(#directions, CPU count)).
+
+Every run *rewrites* the target to hold exactly the requested set of
+directions: it (re)writes the manifest, re-runs every direction from scratch,
+and removes any stale `dirNN` folders left over from a previous run with a
+different `--lebedev-order` (e.g. `dir15` … `dir26` when switching from order 7
+to order 5) — so the target always matches the current inputs and settings, with
+nothing extra left behind.
+
+The quadrature order is user-selectable (`--lebedev-order`), from odd integers
+3 up to 15 (the exact list and point counts live in `gen_nac.py`'s
+`ORDER_TO_POINT_COUNT`):
+
+| order | 3 | 5 | 7 (default) | 9 | 11 | 13 | 15 (cap) |
+|-------|---|---|-------------|---|----|----|----------|
+| dirs  | 6 | 14 | 26 | 38 | 50 | 74 | 86 |
+
+- order 3 → ±coordinate axes
+- order 5 → axes + body diagonals
+- order 7 → axes + face diagonals + body diagonals (the classic 26-point rule;
+  weights `1/21`, `4/105`, `9/280` — byte-identical to the original generator)
+- order 9 → axes + 24 in-plane intermediate directions + body diagonals
+- orders 11 / 13 / 15 → the same family refined with more in-plane / body-diagonal directions
+
+Order 15 (86 dirs) is the cap: it keeps every direction folder two-digit
+(`dir01` … `dir86`). Higher orders (17 → 110 dirs, 19 → 146 dirs, …) would
+push folder names to three digits and add little value for a weighted
+spherical average.
+
+`gen_nac.py` is also the **single source of truth for the NAC quadrature**:
+`RASCBEC_phonopy.py` imports `lebedev_points` / `lebedev_subset` /
+`ORDER_TO_POINT_COUNT` / `POINT_COUNT_TO_ORDER` from it, so the manifest
+weights and the weights the consumer validates against can never drift apart
+(both come from `scipy.integrate.lebedev_rule`).
+
+```bash
+python gen_nac.py                          # order 7 (26 dirs), auto parallelism
+python gen_nac.py --lebedev-order 5        # order 5 (14 dirs)
+python gen_nac.py --lebedev-order 15       # highest rule (86 dirs)
+```
+
+### Consuming the direction runs — `RASCBEC_phonopy.py`
+
+Run `RASCBEC_phonopy.py` with no arguments and it looks for one of:
+
+- `nac_directions.json` — a manifest of the NAC directions, or
+- sibling folders named `dir01` … `dirNN`, each containing a `direction.conf`
+  (with `NAC = .TRUE.` and `Q_DIRECTION`) and a `qpoints.yaml`.
 
 If neither is found, the script transparently falls back to the original
 single-`qpoints.yaml` mode (`--input-mode auto` is the default).
 
 The multi-mode path enforces, before any output is written:
 
-- the **complete 26-point Lebedev rule** — all 26 physical directions
-  (1-axis, 2-axis and 3-axis) present exactly once; duplicates, missing
-  directions, or non-Lebedev directions abort with no silent fallback;
-- the **degree-7 weights** `1/21`, `4/105`, `9/280` (matched by the
-  number of non-zero Cartesian components) and a unit sum;
+- the **complete Lebedev rule** for the data's order (any
+  `scipy.integrate.lebedev_rule` order — order 3 = 6 directions up to order
+  15 = 86; e.g. order 7 = 26) — every physical direction present exactly
+  once; duplicates, missing directions, or non-Lebedev directions abort with no
+  silent fallback;
+- the **quadrature weights** for that order (e.g. `1/21`, `4/105`, `9/280` for
+  order 7) and a unit sum;
 - manifest / `direction.conf` / Cartesian **direction agreement**, plus
   POSCAR ↔ manifest lattice/symbol/position consistency.
+
+`--lebedev-order` lets you re-weight a *subset* of the computed directions to a
+lower order (e.g. `--lebedev-order 5` uses the 14 order-5 directions from
+order-7 data); a higher order than the data errors out (no silent fallback).
 
 Per direction, Gamma-point eigenvectors are validated (unit norm,
 real-valued), rigid translations are rejected by mass-weighted overlap
@@ -177,7 +234,7 @@ real-valued), rigid translations are rejected by mass-weighted overlap
 provenance file. Activities are computed once with the shared RASCBEC
 routine and **weighted by the Lebedev weights before CSV output**; the
 CSV rows are directional sticks, not unique modes (declared in the header
-via `# Phonon_treatment: NAC_Lebedev26`).
+via `# Phonon_treatment: NAC_Lebedev_order<order>`, e.g. `NAC_Lebedev_order7`).
 
 Outputs (suffix `_NAC`):
 
@@ -220,8 +277,12 @@ pip install numpy scipy matplotlib pymatgen pyyaml
 ```bash
 RASCBEC/
 ├── rotate.py                - Rotate POSCAR; create all 8 subdirectories for BEC runs
+├── gen_nac.py               - Scaffold the NAC multi-direction phonopy runs
+│                              (one dirNN/ per Lebedev direction; order 3..15; parallel --jobs);
+│                              also the single source of truth for the shared Lebedev-Laikov
+│                              rule (scipy.integrate.lebedev_rule) imported by RASCBEC_phonopy.py
 ├── RASCBEC_phonopy.py       - Raman activities from phonopy YAML (qpoints.yaml + irreps.yaml);
-│                              includes automatic NAC 26-direction Lebedev-averaged mode
+│                              includes automatic NAC multi-direction Lebedev-averaged mode
 ├── RASCBEC_VASP.py          - Raman activities using VASP DFPT eigenvectors (same maturity as phonopy variant)
 ├── plot_raman.py            - Shared plotting library: single-composition spectrum, Stokes conversion,
 │                              peak labels, two-line symbolic titles, CSV reader, DOPANT_SUBSTITUTIONS
@@ -638,7 +699,7 @@ lines and Lebedev-weighted activities:
 ```bash
 # Formula: Na3PS4
 # E_field: 0.02
-# Phonon_treatment: NAC_Lebedev26
+# Phonon_treatment: NAC_Lebedev_order7
 # Activity_semantics: quadrature_weight_times_raw_Placzek_activity
 # Row_semantics: directional_sticks_not_unique_modes
 # Mode,Freq_cm-1,Activity,Irrep

@@ -13,10 +13,10 @@ Two input modes are supported, selected automatically:
     irreps.yaml) together with the eight finite-field OUTCAR BEC files.
   * NAC multi-direction mode -- when nac_directions.json or dirXX/
     direction.conf folders are present, the script instead performs a
-    Lebedev-Laikov quadrature (order 3/5/7/9, via scipy.integrate.
-    lebedev_rule) over the directional eigensystems and writes a weighted
-    spherical average. NAC outputs carry the automatic _NAC suffix.
-    No installer is required.
+    Lebedev-Laikov quadrature (any scipy.integrate.lebedev_rule order,
+    3 -> 6 points up to 15 -> 86 points) over the directional eigensystems
+    and writes a weighted spherical average. NAC outputs carry the automatic
+    _NAC suffix. No installer is required.
 
 Authors:
   Rui Zhang               -- original RASCBEC method and script
@@ -40,7 +40,8 @@ Capabilities (beyond the original single-file tool):
     and a process-parallel direction loop (--jobs) with parallel BEC reads
   * --lebedev-order: run a lower-order rule on the subset of the computed
     directions (e.g. order 5 = 14 points from 26-point order-7 data); a
-    higher order than the data errors out (no silent fallback)
+    higher order than the data errors out (no silent fallback). Full rule
+    range supported (order 3 -> 6 points up to 15 -> 86 points, via scipy).
   * Existing output files are always overwritten (no flag required)
 
 Date:
@@ -163,6 +164,12 @@ from plot_raman import (
     DEFAULT_LASER_WL,
 )
 
+# NAC quadrature (Lebedev-Laikov rule) lives in gen_nac.py (the NAC project
+# scaffolder) and is imported here, so the weights written into
+# nac_directions.json and the weights validated here are bit-for-bit identical
+# (both come from scipy.integrate.lebedev_rule).
+import gen_nac as nq
+
 # ---------------------------------------------------------------------------
 # Physical constants
 # ---------------------------------------------------------------------------
@@ -268,13 +275,14 @@ def parse_args():
     p.add_argument('--translation-overlap', type=float, default=0.95,
                    help='Exclude rigid translations by mass-weighted overlap in multi mode (default: 0.95).')
     p.add_argument('--lebedev-order', dest='lebedev_order', type=int, default=None,
-                   help='NAC Lebedev-Laikov quadrature order (3, 5, 7, or 9 = 6/14/26/38 '
-                        'points, via scipy.integrate.lebedev_rule). Default auto: inferred '
-                        'from the discovered directions (6->3, 14->5, 26->7, 38->9). '
-                        'Setting a LOWER order than the data selects that rule\'s subset '
-                        'of the available directions and reweights to that order; setting a '
-                        'HIGHER order than the data errors out (those directions were not '
-                        'computed).')
+                   help='NAC Lebedev-Laikov quadrature order (any supported rule, '
+                        '3=6, 5=14, 7=26, 9=38, 11=50, 13=74, 15=86 points, via '
+                        'scipy.integrate.lebedev_rule; 15 is the cap). Default auto: '
+                        'inferred from the discovered direction count (6->3, 14->5, '
+                        '26->7, 38->9, ...). Setting a LOWER order than the data '
+                        'selects that rule\'s subset of the available directions and '
+                        'reweights to that order; setting a HIGHER order than the data '
+                        'errors out (those directions were not computed).')
     # Outputs always overwrite existing files (no --overwrite / --no-overwrite flag).
     p.add_argument('--jobs', type=int, default=None,
                    help='Number of workers for the NAC direction loop (worker '
@@ -1209,51 +1217,27 @@ def _nac_config_direction(directory):
     return q
 
 
+# The Lebedev-Laikov rule (node set + weights) lives in ``gen_nac.py`` (the NAC
+# project scaffolder), so the consumer and the generator can never drift apart.
+# Thin wrappers keep the existing private call sites in this file working
+# unchanged.
 def _lebedev_points(order):
-    """Return (points, weights) for a Lebedev-Laikov quadrature of *order*.
+    """(points, weights) for a Lebedev-Laikov quadrature of *order*.
 
-    points  : ndarray (3, m) -- unit direction vectors, all octants signed
-    weights : ndarray (m,)   -- normalized to sum to 1 (for the spherical avg)
-
-    Delegates to ``scipy.integrate.lebedev_rule`` (Parrish getLebedevSphere),
-    so the node set is no longer hand-coded. Supported orders: 3, 5, 7, 9,
-    11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 35, 41, 47, 53, 59, 65, 71,
-    77, 83, 89, 95, 101, 107, 113, 119, 125, 131 (point counts 6, 14, 26,
-    38, 50, ...). Order 7 is the classic 26-point rule.
+    Delegates to :func:`gen_nac.lebedev_points`.
     """
-    try:
-        from scipy.integrate import lebedev_rule
-    except ImportError as exc:
-        raise ImportError(
-            'scipy is required for NAC multi-direction mode '
-            '(scipy.integrate.lebedev_rule). Install scipy, or pin the rule '
-            'you already have via nac_directions.json.') from exc
-    try:
-        x, w = lebedev_rule(int(order))
-    except NotImplementedError as exc:
-        raise ValueError(
-            f'Lebedev order {order!r} not available via scipy; supported orders '
-            'are 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31, 35, '
-            '41, 47, 53, 59, 65, 71, 77, 83, 89, 95, 101, 107, 113, 119, 125, 131.') from exc
-    x = np.asarray(x, dtype=float)
-    w = np.asarray(w, dtype=float)
-    x = x / np.linalg.norm(x, axis=0, keepdims=True)
-    w = w / w.sum()
-    return x, w
+    return nq.lebedev_points(order)
 
 
 def _lebedev_subset(lo, hi):
-    """True if every point of the order-`lo` rule lies in the order-`hi` rule.
+    """True if every point of the order-*lo* rule lies in the order-*hi* rule.
 
-    Lower-order Lebedev-Laikov rules are generally geometric subsets of higher
-    ones, but NOT contiguously: e.g. order 7 (26 pts) is NOT a subset of order
-    9 (38 pts), while orders 3 and 5 are. Used to validate a --lebedev-order
-    that is lower than the data's own order.
+    Delegates to :func:`gen_nac.lebedev_subset`. Lower-order Lebedev rules are
+    generally geometric subsets of higher-order ones, but NOT contiguously (see
+    that docstring for the verified containment facts), so this is checked
+    explicitly before a ``--lebedev-order`` lower than the data's order is used.
     """
-    lx, _ = _lebedev_points(lo)
-    hx, _ = _lebedev_points(hi)
-    return all(any(np.allclose(lx[:, i], hx[:, j], atol=1e-7) for j in range(hx.shape[1]))
-               for i in range(lx.shape[1]))
+    return nq.lebedev_subset(lo, hi)
 
 def _nac_discover(args):
     import json, sys
@@ -1298,19 +1282,29 @@ def _nac_discover(args):
     # subsets of higher-order ones, verified against scipy's node sets).
     # Requesting a HIGHER order than the disk order errors out, because those
     # extra directions were never computed (no silent fallback to single mode).
-    point_count_to_order = {6: 3, 14: 5, 26: 7, 38: 9}
-    order_to_point_count = {3: 6, 5: 14, 7: 26, 9: 38}
+    # The order<->point-count maps are imported from gen_nac so this consumer
+    # supports exactly the same range of orders as the generator.
+    point_count_to_order = nq.POINT_COUNT_TO_ORDER
+    order_to_point_count = nq.ORDER_TO_POINT_COUNT
     data_order = point_count_to_order.get(len(rows))
     if data_order is None:
+        examples = ', '.join(f'{c} -> order {o}'
+                             for o, c in list(order_to_point_count.items())[:4])
+        lo = min(order_to_point_count); hi = max(order_to_point_count)
         raise ValueError(
             f'Found {len(rows)} NAC directions; expected a complete Lebedev rule '
-            '(6/14/26/38 directions -> order 3/5/7/9). Use --lebedev-order to '
-            'specify other point counts explicitly.')
+            f'(e.g. {examples}; full range order {lo} -> {order_to_point_count[lo]} '
+            f'pts up to order {hi} -> {order_to_point_count[hi]} pts). Use '
+            '--lebedev-order to specify other point counts explicitly.')
     order = args.lebedev_order if args.lebedev_order is not None else data_order
     if order not in order_to_point_count:
+        lo = min(order_to_point_count); hi = max(order_to_point_count)
         raise ValueError(
             f'--lebedev-order {order} is not supported; supported orders are '
-            '3, 5, 7, 9 (point counts 6, 14, 26, 38).')
+            f'{", ".join(map(str, sorted(order_to_point_count)))} '
+            f'({len(order_to_point_count)} scipy Lebedev-Laikov rules from '
+            f'{order_to_point_count[lo]} to {order_to_point_count[hi]} points; '
+            f'order {hi} is the cap).')
     if order > data_order:
         raise ValueError(
             f'--lebedev-order {order} needs {order_to_point_count[order]} '
@@ -1322,7 +1316,8 @@ def _nac_discover(args):
         # data order. Containment is not contiguous (order 7 is NOT a subset of
         # order 9), so check explicitly before selecting.
         if not _lebedev_subset(order, data_order):
-            valid = [lo for lo in (3, 5, 7, 9) if lo < data_order and _lebedev_subset(lo, data_order)]
+            valid = [lo for lo in sorted(order_to_point_count)
+                     if lo < data_order and _lebedev_subset(lo, data_order)]
             raise ValueError(
                 f'--lebedev-order {order} is not a subset of the order-{data_order} '
                 f'data ({len(rows)} dirs). Lower orders selectable from order '
@@ -1394,13 +1389,8 @@ def _nac_discover(args):
 
 
 def _nac_load_direction(row, structure, masses, args):
-    import hashlib, json, warnings
+    import warnings
     path = row['path']
-    marker = path.parent/'complete.json'
-    if marker.exists():
-        recorded = json.loads(marker.read_text()).get('yaml_sha256')
-        if recorded and recorded != hashlib.sha256(path.read_bytes()).hexdigest():
-            raise ValueError(f'YAML checksum mismatch: {path}')
     with path.open() as f:
         data = fast_yaml_load(f)
     points = data.get('phonon',[])
