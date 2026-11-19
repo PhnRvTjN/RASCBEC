@@ -146,10 +146,12 @@ with a shared, validated set of role-resolution rules:
 
 ---
 
-## Automatic NAC Multi-Direction Mode (phonopy variant)
+## Automatic NAC Multi-Direction Mode
 
-`RASCBEC_phonopy.py` supports a **fixed-field NAC (non-analytic
-correction) workflow** with automatic spherical averaging.
+`RASCBEC_phonopy.py` supports a **fixed-field NAC (non-analytic correction)
+workflow** with automatic spherical averaging. The VASP variant
+(`RASCBEC_VASP.py`) reads flat VASP DFPT `.dat` files and does **not** support
+NAC multi-direction mode — use `RASCBEC_phonopy.py` for that workflow.
 
 ### Scaffolding the direction runs — `gen_nac.py`
 
@@ -245,11 +247,12 @@ Outputs (suffix `_NAC`):
 <chem>_E<E>_NAC.png
 ```
 
-Existing outputs are never overwritten without `--overwrite`.
+Existing outputs are always overwritten (no flag required).
 
-> The NAC mode is a phonopy-YAML feature; `RASCBEC_VASP.py` is unaffected.
-> No electro-optic correction beyond the fixed-field RASCBEC response is
-> applied; downstream Stokes conversion and broadening are unchanged.
+> The NAC mode reads the per-direction phonopy YAML (`dirNN/qpoints.yaml`),
+> whose eigenvectors are raw and are mass-weighted internally. No electro-optic
+> correction beyond the fixed-field RASCBEC response is applied; downstream
+> Stokes conversion and broadening are unchanged.
 
 ---
 
@@ -283,7 +286,8 @@ RASCBEC/
 │                              rule (scipy.integrate.lebedev_rule) imported by RASCBEC_phonopy.py
 ├── RASCBEC_phonopy.py       - Raman activities from phonopy YAML (qpoints.yaml + irreps.yaml);
 │                              includes automatic NAC multi-direction Lebedev-averaged mode
-├── RASCBEC_VASP.py          - Raman activities using VASP DFPT eigenvectors (same maturity as phonopy variant)
+├── RASCBEC_VASP.py          - Raman activities using VASP DFPT eigenvectors (single-direction;
+│                              no NAC multi-direction mode — see RASCBEC_phonopy.py for that)
 ├── plot_raman.py            - Shared plotting library: single-composition spectrum, Stokes conversion,
 │                              peak labels, two-line symbolic titles, CSV reader, DOPANT_SUBSTITUTIONS
 ├── compare_raman.py         - Multi-composition / multi-E-field comparison (waterfall or overlaid)
@@ -291,7 +295,6 @@ RASCBEC/
 ├── qpoints_to_eigfreq.py    - Legacy: convert qpoints.yaml -> .dat (no longer needed)
 ├── mesh_to_eigfreq.py       - Legacy: convert mesh.yaml -> .dat (no longer needed)
 ├── RASCBEC_vasp.py          - Original upstream script (preserved for reference)
-├── Code/                    - Original upstream scripts (e.g. rotate.py)
 └── Example/                 - GeO2 rutile example inputs and reference outputs
 ```
 
@@ -539,6 +542,37 @@ Na3PS4_compare_gnorm.png   # global normalised waterfall
 Na3PS4_compare_abs.png     # absolute overlaid
 ```
 
+### 7 - NAC Multi-Direction Workflow *(phonopy path only)*
+
+The steps above compute a **single** Gamma-point spectrum. For the
+spherically-averaged NAC spectrum (non-analytic-corrected phonons sampled
+over a Lebedev-Laikov rule), replace step 3's single YAML with a set of
+per-direction runs. `RASCBEC_VASP.py` does **not** support this path.
+
+```bash
+# 7a. Scaffold one self-contained phonopy project per NAC direction
+#     (dir01/ … dirNN/ under the target, each with direction.conf +
+#      Q_DIRECTION + qpoints.yaml), write nac_directions.json, and run
+#     the per-direction phonopy jobs in parallel.
+python gen_nac.py                       # order 7 -> 26 directions (default)
+python gen_nac.py --lebedev-order 5     # coarser rule (14 directions)
+python gen_nac.py --lebedev-order 15    # finest rule (86 directions, cap)
+
+# 7b. Compute the Lebedev-weighted spectrum. Auto-detected: with
+#     nac_directions.json (or dir01…dirNN/) present, NAC mode is selected
+#     automatically — no --input-mode flag needed.
+python RASCBEC_phonopy.py               # weighted _NAC.csv + provenance + plot
+
+# 7c. (Optional) Re-weight the same data to a coarser rule without
+#     re-running phonopy:
+python RASCBEC_phonopy.py --lebedev-order 5   # use the 14 order-5 dirs
+```
+
+The full NAC physics, validation rules, and output provenance are described
+in the [Automatic NAC Multi-Direction Mode](#automatic-nac-multi-direction-mode)
+section above. The NAC path uses the same plotting/comparison tools
+(`plot_raman.py`, `compare_raman.py`) on the generated `_NAC.csv` files.
+
 ---
 
 ## CLI Reference
@@ -555,6 +589,16 @@ Na3PS4_compare_abs.png     # absolute overlaid
 | `--no-sbatch` | — | Disable sbatch copying entirely |
 | `--axis-tol` | `0.90` | Cosine alignment threshold for row-to-axis reporting |
 | `--strict-axis-report` | — | Abort if row-to-axis alignment is weak or ambiguous |
+
+### `gen_nac.py`
+
+| Argument | Default | Description |
+| --- | --- | --- |
+| `--poscar` | `POSCAR` | Structure to use (POSCAR in the current directory) |
+| `--phonopy` | `phonopy` | Phonopy executable to run per NAC direction |
+| `--lebedev-order` | `7` | Lebedev-Laikov quadrature order (odd 3–15); point counts 3→6, 5→14, 7→26, 9→38, 11→50, 13→74, 15→86. Order 15 is the cap |
+| `--jobs` | auto | Parallel workers for the per-direction phonopy runs (auto = min(#directions, CPU count); `--jobs 1` forces sequential) |
+| `--threads` | auto | Cap on BLAS/OpenMP threads per phonopy process (auto = CPU count / workers, so workers × threads ≈ cores; `--threads 0` leaves it uncapped) |
 
 ### `RASCBEC_phonopy.py`
 
@@ -574,12 +618,15 @@ Na3PS4_compare_abs.png     # absolute overlaid
 | `--directions-json` | auto | Override the `nac_directions.json` manifest location |
 | `--nac-min-thz` | `0.1` | Multi-mode: minimum retained frequency in THz |
 | `--translation-overlap` | `0.95` | Multi-mode: rigid-translation rejection threshold (mass-weighted overlap) |
-| `--overwrite` | — | Allow replacing existing multi-mode outputs (single-mode behavior unchanged) |
+| `--lebedev-order` | auto | NAC quadrature order; a lower order re-weights a subset of the data, a higher order errors out |
+| `--jobs` | auto | Workers for the NAC direction loop (processes) and BEC reads; `--jobs 1` forces sequential |
 | `--no-plot` | — | Skip PNG generation |
 | `--no-sticks` | — | Hide stick spectrum in plot |
 | `--n-labels` | `10` | Number of peak frequency labels |
 | `--out-csv` | auto | Override output CSV name |
 | `--out-png` | auto | Override output PNG name |
+
+> Existing output files are always overwritten (no `--overwrite` flag).
 
 ### `RASCBEC_VASP.py`
 
@@ -593,11 +640,14 @@ Na3PS4_compare_abs.png     # absolute overlaid
 | `--freq-max` | auto | Upper plot x-limit (cm⁻¹) |
 | `--bas` | auto | Basis species (or `+`-joined group) normalised to coefficient 1; denominator of dopant x-values |
 | `--dops` | auto | Explicit dopant species list; overrides the 5 % abundance inference |
+| `--jobs` | `1` | Worker threads for the eight BEC file reads (I/O bound); raise to read the OUTCARs in parallel |
 | `--no-plot` | — | Skip PNG generation |
 | `--no-sticks` | — | Hide stick spectrum in plot |
 | `--n-labels` | `10` | Number of peak frequency labels |
 | `--out-csv` | auto | Override output CSV name |
 | `--out-png` | auto | Override output PNG name |
+
+> Existing output files are always overwritten (no `--overwrite` flag).
 
 ### `plot_raman.py`
 
@@ -771,7 +821,6 @@ cd Example
 # Assemble subdirectory layout (OUTCAR1 -> ./1/OUTCAR, etc.)
 for d in 1 m1 x mx y my z mz; do mkdir -p $d && cp OUTCAR$d $d/OUTCAR; done
 python ../RASCBEC_VASP.py --E 0.1          # uses VASP DFPT eigenvectors directly
-python ../RASCBEC_phonopy.py --E 0.1       # uses qpoints.yaml + irreps.yaml
 ```
 
 Expected outputs (chemistry-based names, E supplied):
@@ -781,8 +830,14 @@ GeO2_E0.1.csv
 GeO2_E0.1.png
 ```
 
+> `RASCBEC_phonopy.py` reads `qpoints.yaml` + `irreps.yaml`, which are
+> **not** shipped in `Example/`. To exercise the phonopy path (or the NAC
+> multi-direction path) you must first generate those YAML files in your
+> own working directory (Workflow step 3, or `gen_nac.py`). `Example/`
+> provides the VASP DFPT reference only.
+
 Reference activities for cross-checking are in `Example/raman_vasp.dat`
-and `Example/raman_phonopy.dat`.
+(VASP path) and `Example/raman_phonopy.dat` (phonopy path).
 
 ---
 

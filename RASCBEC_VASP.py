@@ -17,12 +17,14 @@ auto-generated informative plot title,
 basis-group and dopant roles (--bas, --dops) with base-formula reconstruction,
 vectorised Raman activity loop via numpy einsum,
 reverse-scan OUTCAR BEC reader,
-temperature/laser-wavelength Stokes intensity options (--temp, --laser-wl).
+temperature/laser-wavelength Stokes intensity options (--temp, --laser-wl),
+--jobs parallel BEC file reads (thread pool, I/O bound).
 
 Date: 2025-04-28 (original); 2026-02-23 (patched); 2026-03-04 (chemistry naming);
       2026-11-16 (parity with RASCBEC_phonopy.py: --bas/--dops roles, base-formula
                   reconstruction, vectorised activity loop, reverse-scan BEC reader,
-                  --temp/--laser-wl, shared two-line plot title)
+                  --temp/--laser-wl, shared two-line plot title);
+      2026-11-19 (--jobs parallel BEC file reads)
 
 License: GNU GENERAL PUBLIC LICENSE
 
@@ -35,7 +37,8 @@ using the RASCBEC method.
 
 Key distinctions from RASCBEC_phonopy.py:
 - Phonon input is the flat VASP DFPT export (freqs_vasp.dat / eigvecs_vasp.dat),
-  not phonopy YAML; no irrep labels or automatic NAC multi-direction support.
+  not phonopy YAML; no irrep labels, no NAC multi-direction support
+  (use RASCBEC_phonopy.py for NAC).
 - VASP outputs frequencies already in cm-1 (no THz conversion needed).
 - VASP eigenvectors are already mass-normalised (no /sqrt(mass) step).
 - All other routines (BEC reading, dZ*/dE tensor, Raman activity, chemistry
@@ -107,12 +110,14 @@ python RASCBEC_VASP.py --E 0.02 --gamma 0.2
 python RASCBEC_VASP.py --no-plot
 python RASCBEC_VASP.py --freq-min 50 --freq-max 600
 python RASCBEC_VASP.py --bas Ti+Ga --dops Y Ga  # doped LLTO, Ti+Ga = 1
+python RASCBEC_VASP.py --jobs 8                 # parallel BEC file reads
 python RASCBEC_VASP.py --help
+(existing output files are always overwritten -- no flag required)
 """
 
 import argparse
 import re
-from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from pymatgen.core import Element
@@ -202,6 +207,11 @@ def parse_args():
                    help='Output CSV path (default: <chem>_E<E>.csv)')
     p.add_argument('--out-png', default=None,
                    help='Output PNG path (default: <chem>_E<E>.png)')
+    # Outputs always overwrite existing files (no --overwrite / --no-overwrite flag).
+    p.add_argument('--jobs', type=int, default=None,
+                   help='Number of worker threads for the eight BEC file reads '
+                        '(I/O bound). Default: 1 (sequential); raise to read '
+                        'the OUTCARs in parallel (e.g. --jobs 8).')
     return p.parse_args()
 
 
@@ -320,7 +330,15 @@ def get_charges_from_OUTCAR(outcar_path, nat):
     raise ValueError(f"No BEC block found in {outcar_path}.")
 
 
-def load_bec_charges(outcar_map, nat):
+def _resolve_worker_count(requested, default):
+    """Resolve a --jobs value to a positive worker count (1 = sequential)."""
+    if requested is None:
+        return max(1, default)
+    if requested < 1:
+        raise ValueError('--jobs must be >= 1 (use --jobs 1 to force sequential processing).')
+    return requested
+
+def load_bec_charges(outcar_map, nat, jobs=None):
     """
     Read BEC tensors from all 8 finite-difference OUTCAR subdirectories.
 
@@ -328,20 +346,31 @@ def load_bec_charges(outcar_map, nat):
     The resulting dict is keyed by the same labels used in OUTCAR_MAP
     and later consumed by build_charge_derivatives().
 
+    The reads are I/O bound, so they are executed on a thread pool when
+    ``jobs`` > 1. The returned dict preserves the insertion order of
+    ``outcar_map`` regardless of worker completion order.
+
     Parameters
     ----------
     outcar_map : dict -- {label: path} as in OUTCAR_MAP
     nat        : int  -- number of atoms
+    jobs       : int or None -- worker threads (None -> 1, i.e. sequential)
 
     Returns
     -------
     charges : dict[str, list[nat x 3 x 3]] -- BEC tensors keyed by direction label
     """
-    charges = {}
-    for key, path in outcar_map.items():
+    def _read(key_path):
+        key, path = key_path
         print(f"  Reading BEC: {path}")
-        charges[key] = get_charges_from_OUTCAR(path, nat)
-    return charges
+        return key, get_charges_from_OUTCAR(path, nat)
+
+    items = list(outcar_map.items())
+    if jobs is None or jobs <= 1 or len(items) <= 1:
+        return dict(_read(item) for item in items)
+    workers = min(_resolve_worker_count(jobs, 1), len(items))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return dict(pool.map(_read, items))
 
 
 def read_efield_pead(outcar_path='./1/OUTCAR'):
@@ -1004,7 +1033,7 @@ def main():
 
     # --- 4. Born Effective Charges ---
     print("\nLoading BEC tensors ...")
-    charges = load_bec_charges(OUTCAR_MAP, nat)
+    charges = load_bec_charges(OUTCAR_MAP, nat, jobs=args.jobs)
 
     # --- 5. BEC derivatives ---
     dq = build_charge_derivatives(charges, nat, E)
