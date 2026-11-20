@@ -140,9 +140,9 @@ Both RASCBEC scripts derive the chemistry metadata (formula, dopant fractions, f
 
 ### Scaffolding the direction runs — `gen_nac.py`
 
-`gen_nac.py` (run from `Project/04_phon/<composition>`) scaffolds one self-contained phonopy project per NAC direction under `Project/05_rascbec/<composition>/`, each containing symlinks to the shared inputs, a `direction.conf` (`NAC = .TRUE.` + `Q_DIRECTION`), and — after the phonopy run — `qpoints.yaml`. It writes the `nac_directions.json` manifest and runs the independent per-direction phonopy jobs in parallel (`--jobs`; auto = min(#directions, CPU count)).
+`gen_nac.py` (run from a `<NN>_<token>phon/<composition>` directory, e.g. `Project/04_phon/<composition>` or `Project/09_rephon/<composition>`) scaffolds one self-contained phonopy project per NAC direction under the next stage `Project/<NN+1>_<token>rascbec*/<composition>/` (the `<token>` — empty for `04_phon`, `re` for `09_rephon` — is carried across stages, so `09_rephon` → `10_rerascbec`). An existing `<NN+1>_<token>rascbec*` sibling is used when present; otherwise the exact name is created. It writes the `nac_directions.json` manifest and runs the independent per-direction phonopy jobs in parallel (`--jobs`; auto = min(#directions, CPU count)).
 
-> **Prerequisite — a `BORN` file per composition.** NAC (the LO/TO non-analytic correction) needs the Born effective charges, so phonopy must be given a `BORN` file alongside `POSCAR` and `FORCE_CONSTANTS`. `gen_nac.py` symlinks `Project/03_bec/<composition>/BORN` into every `dirNN/` (it hard-fails if that file is missing). That `BORN` file comes from a **VASP LEPSILON calculation**: run a ground-state static calculation with `LEPSILON = .TRUE.` and copy the resulting `BORN` output to `Project/03_bec/<composition>/BORN`. (The 8 finite-field BEC derivatives computed by the RASCBEC scripts are a separate input — read from the `OUTCAR`s — and are *not* the `BORN` file phonopy needs.)
+> **Prerequisite — a `BORN` file per composition.** NAC (the LO/TO non-analytic correction) needs the Born effective charges, so phonopy must be given a `BORN` file alongside `POSCAR` and `FORCE_CONSTANTS`. `gen_nac.py` takes `BORN` from the current `<NN>_<token>phon/<composition>` directory, falling back to the previous stage `Project/<NN-1>_<token>bec*/<composition>/BORN` (e.g. `03_bec` for `04_phon`, `08_rebec` for `09_rephon`) if not found (it hard-fails if neither is present). That `BORN` file comes from a **VASP LEPSILON calculation**: run a ground-state static calculation with `LEPSILON = .TRUE.` and keep the resulting `BORN` file in one of those two places. (The 8 finite-field BEC derivatives computed by the RASCBEC scripts are a separate input — read from the `OUTCAR`s — and are *not* the `BORN` file phonopy needs.)
 
 Every run *rewrites* the target to hold exactly the requested set of directions: it (re)writes the manifest, re-runs every direction from scratch, and removes any stale `dirNN` folders left over from a previous run with a different `--lebedev-order` (e.g. `dir15` … `dir26` when switching from order 7 to order 5) — so the target always matches the current inputs and settings, with nothing extra left behind.
 
@@ -474,7 +474,7 @@ compare_Na3PS4_activity_enorm.png # raw Raman activity S(nu), per-spectrum
 
 The steps above compute a **single** Gamma-point spectrum. For the spherically-averaged NAC spectrum (non-analytic-corrected phonons sampled over a Lebedev-Laikov rule), replace step 3's single YAML with a set of per-direction runs. `RASCBEC_VASP.py` does **not** support this path.
 
-> **Before 7a — provide a `BORN` file.** NAC needs the Born effective charges, so `gen_nac.py` symlinks `Project/03_bec/<composition>/BORN` into every direction folder and aborts if it is missing. Generate that `BORN` file from a **VASP LEPSILON calculation** (`LEPSILON = .TRUE.` with `LCALCEPS = .TRUE.`) and place it at `03_bec/<composition>/BORN`. This is distinct from the 8 finite-field BEC `OUTCAR` derivatives (step 2), which `RASCBEC_phonopy.py` reads separately.
+> **Before 7a — provide a `BORN` file.** NAC needs the Born effective charges, so `gen_nac.py` takes `BORN` from the current `<NN>_<token>phon/<composition>` directory (or, failing that, from the previous stage `Project/<NN-1>_<token>bec*/<composition>/BORN` — e.g. `08_rebec` for `09_rephon`, `03_bec` for `04_phon`) and symlinks it into every direction folder, aborting if neither is found. Generate that `BORN` file from a **VASP LEPSILON calculation** (`LEPSILON = .TRUE.` with `LCALCEPS = .TRUE.`) and place it in one of those two locations. This is distinct from the 8 finite-field BEC `OUTCAR` derivatives (step 2), which `RASCBEC_phonopy.py` reads separately.
 
 ```bash
 # 7a. Scaffold one self-contained phonopy project per NAC direction
@@ -524,10 +524,11 @@ The full NAC physics, validation rules, and output provenance are described in t
 | `--jobs` | auto | Parallel workers for the per-direction phonopy runs (auto = min(#directions, CPU count); `--jobs 1` forces sequential) |
 | `--threads` | auto | Cap on BLAS/OpenMP threads per phonopy process (auto = CPU count / workers, so workers × threads ≈ cores; `--threads 0` leaves it uncapped) |
 
-> **Required inputs:** `gen_nac.py` symlinks `POSCAR`, `FORCE_CONSTANTS`
-> (from `Project/04_phon/<composition>/`), and `BORN` (from
-> `Project/03_bec/<composition>/`) into every direction folder, and aborts
-> if any is missing. The `BORN` file must come from a VASP LEPSILON run
+> **Required inputs:** `gen_nac.py` symlinks `POSCAR` and `FORCE_CONSTANTS`
+> (from the `<NN>_<token>phon/<composition>/` working directory), and `BORN`
+> (from the same directory, or from the previous stage
+> `Project/<NN-1>_<token>bec*/<composition>/` if not found there) into every
+> direction folder, and aborts if any is missing. The `BORN` file must come from a VASP LEPSILON run
 > (`LEPSILON = .TRUE.` / `LCALCEPS = .TRUE.`) — see the
 > [NAC Multi-Direction Workflow](#7---nac-multi-direction-workflow-phonopy-path-only)
 > note.

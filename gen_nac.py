@@ -4,11 +4,15 @@
 r"""
 gen_nac.py -- scaffold the RASCBEC NAC multi-direction phonopy runs.
 
-Run from ``Project/04_phon/<composition>``. The script reads the phonopy
-inputs for the composition and builds, under ``Project/05_rascbec/<composition>/``,
-one self-contained phonopy project per NAC direction:
+Run from a directory named ``<NN>_<token>phon/<composition>`` (e.g.
+``Project/04_phon/<composition>`` or ``Project/09_rephon/<composition>``).
+The ``<token>`` (e.g. ``re``) is the stage family and is carried onto the
+neighbouring stages: the ``BORN`` input is read from ``<NN-1>_<token>bec*``
+(e.g. ``08_rebec`` for ``09_rephon``, ``03_bec`` for ``04_phon``) and the
+output is written under ``<NN+1>_<token>rascbec*`` (e.g. ``10_rerascbec``
+for ``09_rephon``, ``05_rascbec`` for ``04_phon``):
 
-    05_rascbec/<composition>/
+    <NN+1>_<token>rascbec*/
     ├── nac_directions.json        # manifest: directions, weights, provenance
     ├── dir01/
     │   ├── POSCAR FORCE_CONSTANTS BORN   # symlinks (no file duplication)
@@ -86,6 +90,7 @@ import hashlib
 import json
 import multiprocessing as mp
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -197,26 +202,78 @@ def digest(path):
     return h.hexdigest()
 
 
+def _find_sibling_stage(project, nn, stem, prefix=''):
+    """Find a sibling stage folder for stage number *nn* with the given
+    *stem* (``'bec'`` or ``'rascbec'``), if any.
+
+    The naming token is carried across stages: for a ``<NN>_<prefix>phon``
+    working directory the neighbours are ``<NN-1>_<prefix>bec`` (e.g.
+    ``08_rebec`` for ``09_rephon``) and ``<NN+1>_<prefix>rascbec``
+    (``10_rerascbec``). The exact name ``<NN>_<prefix><stem>`` is preferred;
+    a loose ``<NN>_*<stem>*`` glob is the fallback so variants like
+    ``03_becout`` are still found. Only the zero-padded two-digit number is
+    matched, so unrelated folders (``103_bec``, ``3_bec``) are never
+    mistaken for stage 3. Returns the folder's Path, or None.
+    """
+    digits = f'{nn:02d}'
+    exact = f'{digits}_{prefix}{stem}'
+    for entry in sorted(project.iterdir()):
+        if entry.is_dir() and entry.name == exact:
+            return entry
+    matches = sorted(
+        e for e in project.glob(f'{digits}_*{stem}*')
+        if e.is_dir())
+    return matches[0] if matches else None
+
+
 def resolve_project():
     """Validate the working directory and return the project layout.
 
-    The script must be run from ``Project/04_phon/<composition>``. This
-    resolves the four path elements the rest of the workflow needs.
+    The script must be run from a directory named ``<NN>_<prefix>phon``
+    -- a number, ``_``, an optional token, then a name containing
+    ``phon`` (e.g. ``04_phon``, ``07_phonopy``, ``09_rephon``). The token
+    before ``phon`` is the stage family and is carried onto the
+    neighbouring stages:
+
+    * BORN input   -- ``<NN-1>_<prefix>bec*``  (e.g. ``08_rebec`` for
+                      ``09_rephon``, ``03_bec`` for ``04_phon``), or
+                      ``BORN`` in the working directory itself;
+    * output stage -- ``<NN+1>_<prefix>rascbec*`` (e.g. ``10_rerascbec``
+                      for ``09_rephon``, ``05_rascbec`` for ``04_phon``);
+                      an existing sibling is used when present, otherwise
+                      the exact name is created.
+
+    The composition folder name is the directory the script is run from.
 
     Returns
     -------
-    source       : Path -- the ``04_phon/<composition>`` directory (cwd).
-    project      : Path -- the ``Project`` root (``04_phon``'s parent).
+    source       : Path -- the ``<NN>_<prefix>phon/<composition>`` directory
+                           (cwd).
+    project      : Path -- the stage's parent (the project root).
     composition  : str  -- the composition folder name.
-    target       : Path -- ``Project/05_rascbec/<composition>`` (output root).
+    target       : Path -- the output root (``Project/<NN+1>_<prefix>
+                           rascbec*/<composition>``; created by the caller
+                           if needed).
+    nn           : int  -- the stage number parsed from the parent name.
+    prefix       : str  -- the stage-family token (e.g. ``re``, or ``''``).
     """
     source = Path.cwd().resolve()
-    if source.parent.name != '04_phon':
-        raise SystemExit('Run from Project/04_phon/<composition>.')
+    parent_name = source.parent.name
+    m = re.match(r'^(\d+)_([a-z]*?)phon', parent_name)
+    if not m:
+        raise SystemExit(
+            f'Run from a <NN>_*phon/<composition> directory (e.g. '
+            f'Project/04_phon/<composition> or Project/09_rephon/'
+            f'<composition>); got {source}.')
+    nn = int(m.group(1))
+    prefix = m.group(2)
     project = source.parent.parent
     composition = source.name
-    target = project / '05_rascbec' / composition
-    return source, project, composition, target
+    out_stage = _find_sibling_stage(project, nn + 1, 'rascbec', prefix)
+    if out_stage is None:
+        out_stage = project / f'{nn + 1:02d}_{prefix}rascbec'
+    target = out_stage / composition
+    return source, project, composition, target, nn, prefix
 
 
 def read_structure(poscar):
@@ -254,7 +311,7 @@ def verify_target_consistency(target, lattice, nat, symbols, scaled):
     same_pos = delta.shape == scaled.shape and np.allclose(delta, 0, atol=1e-7)
     if not (same_cell and same_symbols and same_pos):
         raise SystemExit(
-            '05_rascbec POSCAR differs in cell, species/order or positions; '
+            '<NN+1>_rascbec POSCAR differs in cell, species/order or positions; '
             'reconcile first before regenerating.')
 
 
@@ -701,11 +758,27 @@ def main(argv=None):
     args = parse_args(argv)
     order = _valid_order(args.lebedev_order)
 
-    source, project, composition, target = resolve_project()
+    source, project, composition, target, nn, prefix = resolve_project()
+    born = source / 'BORN'
+    if not born.is_file() and nn >= 1:
+        # Fall back to the previous stage: <NN-1>_<prefix>bec*/<composition>/BORN.
+        prev_stage = _find_sibling_stage(project, nn - 1, 'bec', prefix)
+        if prev_stage is not None:
+            prev_born = prev_stage / composition / 'BORN'
+            if prev_born.is_file():
+                born = prev_born
+    if not born.is_file():
+        hint = f'{source / "BORN"}'
+        if nn >= 1:
+            prev_stage = _find_sibling_stage(project, nn - 1, 'bec', prefix)
+            hint += (f' or {prev_stage / composition / "BORN"}'
+                     if prev_stage is not None
+                     else (f' or {project / f"{nn - 1:02d}_{prefix}bec" / composition / "BORN"}'))
+        raise SystemExit(f'Missing BORN: look in {hint}')
     inputs = {
         'POSCAR': Path(args.poscar).resolve(),
         'FORCE_CONSTANTS': source / 'FORCE_CONSTANTS',
-        'BORN': project / '03_bec' / composition / 'BORN',
+        'BORN': born,
     }
     for name, path in inputs.items():
         if not path.is_file():
