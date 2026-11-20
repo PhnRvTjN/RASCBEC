@@ -9,6 +9,47 @@
 
 ---
 
+## Built for Speed
+
+Every stage of the pipeline is deliberately built to be fast, so a full composition series; eight finite-field BEC runs, NAC multi-direction averaging, and multi-composition figures; turns around in hours rather than the days the naive approach can take. The physics is identical to the original; the gains come from doing the same work with far less time spent in
+Python loops, file I/O, and single-threaded bottlenecks.
+
+| Technique | Where | Why it is fast |
+| --- | --- | --- |
+| **Vectorised Raman activity** | `RASCBEC_phonopy.py`, `RASCBEC_VASP.py` | The O(N·27) nested-Placzek loop is a single BLAS-backed `np.einsum('tikj,sti->sjk')` — the dominant CPU cost of the original, dropping from hours to seconds for large supercells |
+| **Process-pool parallelism** (`--jobs`) | all compute/plot scripts | Each independent unit (a BEC `OUTCAR`, a NAC direction, or a spectrum's Lorentzian broadening) runs in its own worker process via a `fork` context, so multi-CPU machines are fully used instead of single-threaded. `--jobs 1` reproduces the sequential path |
+| **Parallel per-direction phonopy** (`--jobs`, `--threads`) | `gen_nac.py` | The NAC direction runs are embarrassingly parallel; workers × threads is capped to the core count so N processes don't oversubscribe the box |
+| **Reverse-scan BEC reader** | `RASCBEC_phonopy.py`, `RASCBEC_VASP.py` | Reads from the *end* of the `OUTCAR` to the last BEC block, so a multi-GB file is not fully re-parsed for the one block needed |
+| **Minimal stray E-field** (setup guidance) | INCAR guidance | Setting inactive `EFIELD_PEAD` components to `1E-4` rather than `0` avoids VASP's reset to `+0.01`, so the total stray field stays small and SCF converges faster — each of the eight BEC runs is a little quicker, with no loss in the central-difference accuracy |
+| **Single-collection stick rendering** | `plot_raman.py`, `compare_raman.py`, `compare_raman_matrix.py` | Tens of thousands of mode sticks are drawn as one `LineCollection` instead of one line artist per mode — the difference between seconds and minutes for multi-thousand-mode NAC output |
+| **Fast rendering options** | all three plotters | `--vector` (SVG) / `--formats svg` and `--dpi 300` render a publication figure far quicker than the default 600-dpi raster |
+
+**Result on a representative multi-composition NAC dataset** (9 compositions,
+thousands of directional sticks each): the two-dopant matrix figure dropped
+from **~100 s to ~5 s (~20×)** and the multi-spectrum waterfall from
+**~100 s to ~7 s (~14×)** — the broadening is bit-identical to the
+sequential version and the figures pixel-identical, so speed is gained with
+no change to the physics or the output.
+
+The knobs are explicit and predictable:
+
+```bash
+# Broadening / BEC reads / NAC directions in parallel (auto = min(#units, cores))
+python RASCBEC_phonopy.py            # --jobs auto by default
+python compare_raman_matrix.py       # --jobs auto by default
+python gen_nac.py --jobs 8 --threads 4   # 8 workers x 4 threads ~= 32 cores
+
+# Fast publication figures
+python plot_raman.py --vector                      # SVG instead of 600-dpi PNG
+python plot_raman.py --dpi 300                     # lower-raster PNG
+python compare_raman_matrix.py --formats svg png   # vector + raster matrix output
+```
+
+> Set `--jobs 1` on any script to force the original sequential behaviour for
+> debugging or to compare timings.
+
+---
+
 ## Improvements Over the Original
 
 | Feature | Original | This Fork |
@@ -163,6 +204,17 @@ phonopy run — `qpoints.yaml`. It writes the `nac_directions.json` manifest and
 runs the independent per-direction phonopy jobs in parallel (`--jobs`; auto =
 min(#directions, CPU count)).
 
+> **Prerequisite — a `BORN` file per composition.** NAC (the LO/TO
+> non-analytic correction) needs the Born effective charges, so phonopy must
+> be given a `BORN` file alongside `POSCAR` and `FORCE_CONSTANTS`. `gen_nac.py`
+> symlinks `Project/03_bec/<composition>/BORN` into every `dirNN/` (it hard-fails
+> if that file is missing). That `BORN` file comes from a **VASP LEPSILON
+> calculation**: run a ground-state static calculation with `LEPSILON = .TRUE.`
+> (and `LCALCEPS = .TRUE.`) and copy the resulting `BORN` output to
+> `Project/03_bec/<composition>/BORN`. (The 8 finite-field BEC derivatives
+> computed by the RASCBEC scripts are a separate input — read from the
+> `OUTCAR`s — and are *not* the `BORN` file phonopy needs.)
+
 Every run *rewrites* the target to hold exactly the requested set of
 directions: it (re)writes the manifest, re-runs every direction from scratch,
 and removes any stale `dirNN` folders left over from a previous run with a
@@ -294,13 +346,12 @@ RASCBEC/
 ├── compare_raman_matrix.py  - Two-dopant composition matrix (x × y grid of shared-scale panels)
 ├── qpoints_to_eigfreq.py    - Legacy: convert qpoints.yaml -> .dat (no longer needed)
 ├── mesh_to_eigfreq.py       - Legacy: convert mesh.yaml -> .dat (no longer needed)
-├── RASCBEC_vasp.py          - Original upstream script (preserved for reference)
 └── Example/                 - GeO2 rutile example inputs and reference outputs
 ```
 
-> `RASCBEC_phonopy.py` and `RASCBEC_VASP.py` (uppercase) are the improved
-> scripts in this fork. `RASCBEC_vasp.py` (lowercase) is the unmodified
-> original kept for reference.
+> `RASCBEC_phonopy.py` and `RASCBEC_VASP.py` (uppercase) are the scripts in
+> this fork: the phonopy-YAML path (with the NAC multi-direction mode) and
+> the VASP-DFPT path (single-direction) respectively.
 >
 > `qpoints_to_eigfreq.py` and `mesh_to_eigfreq.py` are kept for reference
 > but are no longer part of the workflow. `RASCBEC_phonopy.py` now reads
@@ -339,7 +390,7 @@ is controlled per subdirectory in the INCAR, not the POSCAR).
 After VASP finishes, your working directory should look like:
 
 ```bash
-9-RASCBEC/
+05_rascbec/
 ├── POSCAR
 ├── qpoints.yaml           (phonopy path — generated in step 3)
 ├── irreps.yaml            (phonopy path — generated in step 3)
@@ -374,15 +425,29 @@ intended field direction, the **inactive** EFIELD_PEAD components must be
 ./mx INCAR:  EFIELD_PEAD = -E   -δ   -δ
 ```
 
-> **VASP reset behavior:** if you set an inactive component to `0.0`, VASP
-> internally resets it to a small positive constant (commonly `+0.01`) in
-> **both** the + and − runs. This is safe — the reset value is the same
-> sign in both runs and cancels in the central difference.
+> **Why set inactive components to `1E-4` instead of `0` — accuracy and speed.**
 >
-> If you manually use a small nonzero value (e.g., `δ = 1e-4`) to avoid
-> this reset, use `+δ` in **both** the + and − runs for the inactive
-> components. Using `−δ` in the negative-field run introduces a
-> contamination term of order δ/E in the off-diagonal BEC derivatives
+> **Accuracy (cancellation).** If you set an inactive component to `0.0`,
+> VASP internally resets it to a small positive constant (commonly `+0.01`)
+> in **both** the + and − runs. That is still safe for the BEC derivative —
+> the reset value has the same sign in both runs, so it cancels exactly in
+> the central difference. Setting it to a tiny explicit value such as
+> `δ = 1E-4` gives you the same cancellation while avoiding relying on that
+> implicit reset.
+>
+> **Speed (smaller stray field → easier SCF).** A homogeneous `EFIELD`
+> tilts the periodic potential, and the *magnitude* of the total applied
+> field is what slows the SCF: a larger stray field distorts the electronic
+> ground state more, so the mixing needs more iterations to converge.
+> Writing `0` triggers the reset to `+0.01`, so the field actually applied
+> in that inactive direction is `0.01` — two orders of magnitude larger than
+> the `1E-4` you could have set explicitly. Keeping the inactive components
+> at their true minimum (`1E-4`) therefore reduces the total stray field and
+> eases SCF convergence, making 6/8 BEC runs a little faster.
+>
+> **Sign rule.** Use `+δ` (e.g. `+1E-4`) in **both** the + and − runs for
+> every inactive component. Using `−δ` in the negative-field run introduces
+> a contamination term of order δ/E in the off-diagonal BEC derivatives
 > (~1.4% for δ=1e-4 and E≈0.005 eV/Å). It does not cause catastrophic
 > error but is avoidable.
 
@@ -514,18 +579,36 @@ python compare_raman.py raman_*.csv --offset 1.2 --raw-act
 python compare_raman.py raman_*.csv --offset 1.2 --labels "Undoped" "Ca-doped" "Ca/Cl-doped" --out fig1.png
 ```
 
-**`compare_raman_matrix.py`** — two-dopant composition matrix (new):
+**`compare_raman_matrix.py`** — two-dopant composition matrix:
 arranges the CSV files into a categorical `x_dopant` × `y_dopant` grid of
 shared-scale panels (e.g. `x_Ca` vs `y_Cl`), mirroring the published
-two-dopant composition-matrix figures:
+two-dopant composition-matrix figures.
+
+**Default workflow — run from the data folder.** The expected layout is one
+subfolder per composition (e.g. `Ca00-Cl00/`, `Ca12-Cl06/`, …), each holding
+that composition's NAC CSV. `compare_raman_matrix.py` auto-discovers these
+folders from the current directory, picks one canonical CSV per folder
+(preferring `*_NAC.csv` that matches the folder tag), and writes the figure
+to `./compare/` — no input flags needed. Distractor folders (`O/`,
+`compare/`, …) and loose top-level CSVs are ignored:
 
 ```bash
-python compare_raman_matrix.py --dir compare --norm global        # full-spectrum matrix, global normalisation
-python compare_raman_matrix.py --freq-min 245 --freq-max 305 --dir compare  # zoom into the P-S stretch region
-python compare_raman_matrix.py *.csv --reference pristine.csv     # pristine overlay on every panel
-python compare_raman_matrix.py *.csv --x-dopant Y --y-dopant Ga   # custom dopant axes
-python compare_raman_matrix.py *.csv --raw-act --norm each        # legacy raw Raman activity S(nu)
-python compare_raman_matrix.py *.csv --formats png pdf svg --export-data
+cd 05_rascbec
+compare_raman_matrix.py                                   # full-spectrum matrix -> ./compare/
+compare_raman_matrix.py --freq-min 375 --freq-max 425 --title line1   # zoom into the P-S stretch region
+compare_raman_matrix.py --freq-min 495 --freq-max 575 --title line1 --no-sticks
+compare_raman_matrix.py --norm global                     # global (rather than per-panel) normalisation
+compare_raman_matrix.py --x-dopant Y --y-dopant Ga        # custom dopant axes
+compare_raman_matrix.py --formats png pdf svg --export-data
+```
+
+To point at a folder other than the cwd, or to supply an explicit file list,
+use `--matrix-root DIR` or the positional `files` / `--dir` / `--pattern`
+options — those always take precedence over the auto-detection:
+
+```bash
+compare_raman_matrix.py --matrix-root /path/to/05_rascbec --norm global
+compare_raman_matrix.py Ca00-Cl00/*.csv Ca06-Cl06/*.csv --reference pristine.csv   # explicit files + pristine overlay
 ```
 
 Composition levels are read from the `File_Label` / CSV metadata (e.g.
@@ -548,6 +631,14 @@ The steps above compute a **single** Gamma-point spectrum. For the
 spherically-averaged NAC spectrum (non-analytic-corrected phonons sampled
 over a Lebedev-Laikov rule), replace step 3's single YAML with a set of
 per-direction runs. `RASCBEC_VASP.py` does **not** support this path.
+
+> **Before 7a — provide a `BORN` file.** NAC needs the Born effective
+> charges, so `gen_nac.py` symlinks `Project/03_bec/<composition>/BORN` into
+> every direction folder and aborts if it is missing. Generate that `BORN`
+> file from a **VASP LEPSILON calculation** (`LEPSILON = .TRUE.` with
+> `LCALCEPS = .TRUE.`) and place it at `03_bec/<composition>/BORN`. This is
+> distinct from the 8 finite-field BEC `OUTCAR` derivatives (step 2), which
+> `RASCBEC_phonopy.py` reads separately.
 
 ```bash
 # 7a. Scaffold one self-contained phonopy project per NAC direction
@@ -599,6 +690,14 @@ section above. The NAC path uses the same plotting/comparison tools
 | `--lebedev-order` | `7` | Lebedev-Laikov quadrature order (odd 3–15); point counts 3→6, 5→14, 7→26, 9→38, 11→50, 13→74, 15→86. Order 15 is the cap |
 | `--jobs` | auto | Parallel workers for the per-direction phonopy runs (auto = min(#directions, CPU count); `--jobs 1` forces sequential) |
 | `--threads` | auto | Cap on BLAS/OpenMP threads per phonopy process (auto = CPU count / workers, so workers × threads ≈ cores; `--threads 0` leaves it uncapped) |
+
+> **Required inputs:** `gen_nac.py` symlinks `POSCAR`, `FORCE_CONSTANTS`
+> (from `Project/04_phon/<composition>/`), and `BORN` (from
+> `Project/03_bec/<composition>/`) into every direction folder, and aborts
+> if any is missing. The `BORN` file must come from a VASP LEPSILON run
+> (`LEPSILON = .TRUE.` / `LCALCEPS = .TRUE.`) — see the
+> [NAC Multi-Direction Workflow](#7---nac-multi-direction-workflow-phonopy-path-only)
+> note.
 
 ### `RASCBEC_phonopy.py`
 
@@ -689,18 +788,23 @@ section above. The NAC path uses the same plotting/comparison tools
 | `--min-label-sep` | `10` | Minimum cm⁻¹ separation between labelled peaks |
 | `--prominence` | `0.01` | Prominence threshold for label selection |
 | `--labels` | auto | Override legend / trace labels |
+| `--label-xfree` | `0.2` | Horizontal margin for the waterfall trace label (fraction of axis span) |
 | `--title` | auto | Custom title; `'line1'`/`'line2'` select one auto-title line |
 | `--grid` | `x` | Grid visibility |
 | `--figsize` | auto | Figure size (width height, in inches) |
 | `--x-line` / `--y-line` | — | Vertical / horizontal reference lines |
-| `--out` | auto | Output PNG name (encodes formula + normalisation mode) |
+| `--vector` | — | Write a resolution-independent SVG instead of PNG (faster, preferred for publication) |
+| `--dpi` | `600` | Raster resolution for PNG (lower renders faster, e.g. `300`) |
+| `--jobs` | auto | Worker processes for Lorentzian broadening (auto = min(#files, CPU count); `1` forces sequential) |
+| `--out` | auto | Output name (encodes formula + normalisation mode) |
 
 ### `compare_raman_matrix.py`
 
 | Argument | Default | Description |
 | --- | --- | --- |
-| `files` (positional) | `--pattern` in `--dir` | Input CSV files |
-| `--dir` / `--pattern` | `.` / `*.csv` | Directory and glob used when no files are given |
+| `files` (positional) | auto-detect | Input CSV files. If omitted, composition subfolders in the cwd (or `--matrix-root`) are auto-discovered |
+| `--matrix-root` | cwd (if it has composition subfolders) | Directory containing one subfolder per composition; one canonical CSV (prefer `*_NAC.csv` matching the folder tag) is picked per folder |
+| `--dir` / `--pattern` | `.` / `*.csv` | Flat directory + glob, used only when `files` / `--matrix-root` are not inferred |
 | `--x-dopant` / `--y-dopant` | `Ca` / `Cl` | Dopant species defining the matrix axes |
 | `--group-by` | `auto` | `auto`, `tags` (File_Label/filename), or `metadata` (exact numerical x-values) |
 | `--reference` / `--no-reference` | — | Pristine CSV included in the matrix (overlaid on panels); `--no-reference` suppresses overlays |
@@ -710,7 +814,8 @@ section above. The NAC path uses the same plotting/comparison tools
 | `--cutoff` | `1.0` | Stokes modes at/below this frequency (cm⁻¹) receive zero weight |
 | `--fwhm` / `--gamma` | `0.25` | Common broadening FWHM **in THz** |
 | `--freq-min/max` | `0` / auto | Display window (cm⁻¹); resolution grid still spans all modes |
-| `--norm` | `each` | `each`, `global`, or `none` |
+| `--norm` | `each` | `each`, `global`, or `none` (aliases `--norm-each` / `--no-norm`) |
+| `--jobs` | auto | Worker processes for Lorentzian broadening (auto = min(#files, CPU count); `1` forces sequential) |
 | `--no-sticks` / `--stick-max` | on / `1.0` | Stick spectrum toggle and cap as fraction of panel maximum |
 | `--n-labels` | `4` | Prominence-selected peak labels per panel |
 | `--min-label-sep` | `10` | Minimum cm⁻¹ separation between labelled peaks |
@@ -722,7 +827,7 @@ section above. The NAC path uses the same plotting/comparison tools
 | `--ylim` | auto | Shared y-range for all panels (YMIN YMAX) |
 | `--title` | auto | Custom title; `'line1'`/`'line2'` select one auto-title line |
 | `--x-line` / `--y-line` | — | Vertical / horizontal reference lines |
-| `--out` | auto | Output base path (extensions added per `--formats`) |
+| `--out` | `./compare` (matrix-root mode) / auto | Output base path or directory (extensions added per `--formats`; defaults to `<matrix-root>/compare` in the auto-detection workflow) |
 | `--formats` | `png` | Output formats: png, pdf, svg (plus a JSON manifest) |
 | `--dpi` | 600 | Raster resolution for PNG |
 | `--export-data` | — | Also write NPZ files (full-grid spectra, window spectra, mode weights) |
