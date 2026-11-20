@@ -107,8 +107,11 @@ Usage
 import argparse
 import glob as _glob
 import json
+import multiprocessing as mp
+import os
 import re
 import warnings
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -118,6 +121,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.collections import LineCollection
 from matplotlib.ticker import MaxNLocator
 
 # Shared physical constants, style, CSV reader, Stokes conversion, Lorentzian
@@ -134,11 +138,14 @@ from plot_raman import (
 # Shared output nomenclature (compare_<formula>_<stokes|activity>_<norm>) so
 # the default output name agrees with compare_raman.py.
 from compare_raman import build_output_name
+# Shared --jobs worker-count resolution (same helper the NAC/phonopy pipeline
+# and compare_raman.py use) so the broadening-parallelism knob behaves alike.
+import gen_nac as nq
 
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
-MAX_POINTS = 2_000_000   # Hard cap on the spectral evaluation grid.
+MAX_POINTS = 1_000_000   # Hard cap on the spectral evaluation grid.
 
 # ---------------------------------------------------------------------------
 # Central layout / styling knobs for the matrix figure.
@@ -265,6 +272,18 @@ def arguments(argv=None):
                    help='Input directory when files are omitted (default: cwd).')
     p.add_argument('--pattern', default='*.csv',
                    help='Input pattern within --dir (default: *.csv).')
+    p.add_argument('--matrix-root', default=None,
+                   help="Directory that contains one subfolder per composition, "
+                        "e.g. 'Ca12-Cl00/', with that composition's NAC CSV "
+                        "inside it. Auto-selects one canonical CSV per "
+                        "composition folder (priority: '*_NAC.csv' matching "
+                        "the folder tag, then any '*_NAC.csv', then any CSV "
+                        "matching the tag, then the largest CSV). Folders "
+                        "whose names don't parse as a X##-Y## composition tag "
+                        "(e.g. 'O/', 'compare/', 'vibrational_comparison/') "
+                        "and loose top-level CSVs are skipped. Cannot be "
+                        "combined with explicit input files or --dir. When "
+                        "used, --out defaults to <matrix-root>/compare.")
     p.add_argument('--reference', type=Path,
                    help='Pristine CSV, also included in the matrix.')
     p.add_argument('--no-reference', action='store_true',
@@ -385,6 +404,13 @@ def arguments(argv=None):
                    help=f'Raster resolution for PNG/SVG (default: {MATRIX_STYLE["dpi"]}).')
     p.add_argument('--export-data', action='store_true',
                    help='Write full/window arrays to NPZ.')
+    p.add_argument('--jobs', type=int, default=None,
+                   help='Number of worker processes to use for the Lorentzian '
+                        'broadening (the only CPU-bound step). Each spectrum is '
+                        'independent, so they broaden in parallel. Default: '
+                        'auto = min(#files, CPU count). 1 forces sequential '
+                        'processing (the original behaviour). The figure render '
+                        'and CSV parsing are not parallelized (single figure).')
 
     a = p.parse_args(argv)
 
@@ -412,7 +438,44 @@ def arguments(argv=None):
         p.error('--min-label-sep must be >= 0.')
     if not (0.0 < a.prominence < 1.0):
         p.error('--prominence must be in (0, 1).')
+    # --- default workflow: discover composition subfolders from the cwd ---
+    # The intended use is: cd into the data folder (which contains one subfolder
+    # per composition, e.g. Ca12-Cl00/, each holding that composition's NAC
+    # CSV) and run the script with no input flags.  When no explicit input is
+    # given and the cwd contains at least one X##-Y## composition subfolder,
+    # treat the cwd as the matrix root and write to ./compare.  Explicit
+    # inputs (files / --dir / --reference / --matrix-root) always take
+    # precedence over this auto-detection.
+    if (a.matrix_root is None and not a.files
+            and a.dir == '.' and a.reference is None):
+        cwd = Path('.').resolve()
+        if cwd.is_dir() and _looks_like_matrix_root(cwd, a.x_dopant, a.y_dopant):
+            a.matrix_root = str(cwd)
+
+    if a.matrix_root is not None:
+        if a.files:
+            p.error('--matrix-root is incompatible with explicit input files.')
+        if a.dir != '.':
+            p.error('--matrix-root is incompatible with --dir; use one or the other.')
+        if a.out is None:
+            # Default: the compare/ directory inside the matrix root (created
+            # if it does not yet exist).  When the caller is standing inside
+            # the root this is equivalent to ./compare.
+            a.out = str(Path(a.matrix_root).resolve() / 'compare')
     return a
+
+
+def _looks_like_matrix_root(dir_path, x_species, y_species):
+    """True if *dir_path* contains at least one X##-Y## composition subfolder."""
+    try:
+        tag_re = re.compile(
+            rf'^{x_species}\d{{1,2}}-{y_species}\d{{1,2}}$')
+        for entry in dir_path.iterdir():
+            if entry.is_dir() and tag_re.match(entry.name):
+                return True
+    except (FileNotFoundError, NotADirectoryError, PermissionError):
+        return False
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +485,13 @@ def arguments(argv=None):
 def input_paths(a):
     """Expand input patterns and deduplicate repeated paths."""
     paths = []
+    if getattr(a, 'matrix_root', None) is not None:
+        paths = discover_matrix_root(
+            a.matrix_root, a.x_dopant, a.y_dopant)
+        if a.reference:
+            paths.append(a.reference.resolve())
+        paths = list(dict.fromkeys(paths))
+        return paths
     for pattern in a.files or [str(Path(a.dir) / a.pattern)]:
         matches = sorted(_glob.glob(pattern))
         if not matches:
@@ -434,6 +504,65 @@ def input_paths(a):
         if not path.is_file():
             raise ValueError(f'Not a file: {path}')
     return paths
+
+
+def discover_matrix_root(root, x_species, y_species):
+    """
+    Auto-discover one canonical NAC CSV per composition folder under *root*.
+
+    A folder qualifies as a composition when :func:`composition_tags`
+    (pattern ``Ca(\\d+)-Cl(\\d+)`` with species substituted) parses its name.
+    Within a qualifying folder, exactly one CSV is selected in priority order:
+
+    1. A ``*_NAC.csv`` file whose name contains the folder tag
+       (e.g. ``Na3PS4_Ca12-Cl00_E0.02_NAC.csv`` inside ``Ca12-Cl00/``).
+    2. Any ``*_NAC.csv`` file in the folder.
+    3. Any CSV whose name contains the folder tag.
+    4. The largest remaining CSV (by byte size).
+
+    Returns a sorted list of resolved absolute :class:`Path`.  Raises
+    :class:`FileNotFoundError` if no composition folder is found.
+    """
+    root = Path(root).resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f'--matrix-root is not a directory: {root}')
+
+    # Folder names look like '<x>##-<y>##' (e.g. 'Ca12-Cl00'), 1-2 digit
+    # concentrations per species.  The $ anchor keeps 'O/' and 'compare/' out.
+    tag_re = re.compile(
+        rf'^{x_species}\d{{1,2}}-{y_species}\d{{1,2}}$')
+
+    selected = []
+    for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+        if not entry.is_dir():
+            continue
+        m = tag_re.search(entry.name)
+        if not m:
+            continue
+        csvs = [p for p in entry.iterdir() if p.is_file()
+                and p.name.lower().endswith('.csv')]
+        if not csvs:
+            continue
+        tag = entry.name.lower()
+        # Priority 1: *_NAC.csv files whose names contain the folder tag
+        # (e.g. 'Na3PS4_Ca12-Cl00_E0.02_NAC.csv' in 'Ca12-Cl00/').
+        hit = [p for p in csvs
+               if tag in p.name.lower() and p.name.lower().endswith('_nac.csv')]
+        # Priority 2: any *_NAC.csv in the folder.
+        if not hit:
+            hit = [p for p in csvs if p.name.lower().endswith('_nac.csv')]
+        # Priority 3: any file whose name contains the folder tag.
+        if not hit:
+            hit = [p for p in csvs if tag in p.name.lower()]
+        # Priority 4: largest remaining candidate.
+        if not hit:
+            hit = [max(csvs, key=lambda p: p.stat().st_size)]
+        selected.append(hit[0].resolve())
+    if not selected:
+        raise FileNotFoundError(
+            f'No composition subfolders (matching {x_species}##-{y_species}##) '
+            f'found under --matrix-root: {root}')
+    return sorted(selected)
 
 
 def read_csv(path):
@@ -632,6 +761,58 @@ def uniform_grid(lower, upper, step):
     return np.linspace(lower, upper, count)
 
 
+def _evaluate_one(payload):
+    """Evaluate one spectrum's Lorentzian sum (worker unit).
+
+    Module-level (not a closure) so it is picklable and can run in a
+    ``ProcessPoolExecutor`` -- the Lorentzian sum is pure NumPy and GIL-bound,
+    so a *process* pool (not threads) gives real CPU parallelism. Each payload
+    is self-contained (its own frequencies/weights, the shared grid, the FWHM),
+    so workers need no cross-process coordination and the output is
+    bit-identical to the sequential path (same float operations, same order).
+    """
+    grid, frequencies, weights, fwhm = payload
+    return evaluate(grid, frequencies, weights, fwhm)
+
+
+def evaluate_many(payloads, jobs=None, verbose=True):
+    """Evaluate several Lorentzian sums, in parallel across files when
+    beneficial.
+
+    Mirrors the repo's parallelism pattern (``gen_nac.py`` /
+    ``RASCBEC_phonopy.py`` / ``compare_raman.py``): a ``ProcessPoolExecutor``
+    with a ``fork`` context, at most one worker per payload and per CPU.
+    Falls back to the sequential loop when there is nothing to parallelise or
+    ``jobs`` resolves to 1. Results are returned in input order regardless of
+    completion order.
+
+    ``verbose=False`` suppresses the "broadening ... spectra" progress line
+    (used for the second, window-grid pass in :func:`spectra` so the message
+    is not printed twice per run).
+    """
+    if not payloads:
+        return []
+    if len(payloads) <= 1 or jobs is not None and jobs <= 1:
+        return [_evaluate_one(p) for p in payloads]
+
+    workers = min(len(payloads), nq.resolve_worker_count(
+        jobs, max(1, os.cpu_count() or 1)))
+    if workers <= 1:
+        return [_evaluate_one(p) for p in payloads]
+
+    # 'fork' reuses the already-imported module in workers (no re-import of
+    # numpy/matplotlib); safe here because no threads are running at fork time.
+    try:
+        ctx = mp.get_context('fork')
+    except ValueError:  # platforms without fork
+        ctx = None
+    if verbose:
+        print(f'  broadening {len(payloads)} spectra on {workers} worker process(es) '
+              f'(--jobs {jobs if jobs is not None else "auto"})', flush=True)
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
+        return list(pool.map(_evaluate_one, payloads, chunksize=1))
+
+
 def spectra(samples, a):
     """
     Compute full-grid normalisation and directly evaluated window spectra.
@@ -660,7 +841,12 @@ def spectra(samples, a):
             f'--freq-min ({a.freq_min:g}) must be < --freq-max ({freq_max:g}).')
     window = uniform_grid(a.freq_min, freq_max, step)
     weights = [mode_weights(s, a) for s in samples]
-    raw = np.array([evaluate(full, s.frequencies, w, width) for s, w in zip(samples, weights)])
+    # Each spectrum (full grid and window grid) is an independent unit of
+    # work, so evaluate across files in parallel (see evaluate_many); --jobs 1
+    # reproduces the original sequential loops.
+    raw = np.array(evaluate_many(
+        [(full, s.frequencies, w, width) for s, w in zip(samples, weights)],
+        jobs=a.jobs))
     if not np.isfinite(raw).all() or not np.any(raw > 0):
         raise ValueError('Spectra are nonfinite or all zero; check input/model settings.')
     divisors = (raw.max(axis=1) if a.norm == 'each'
@@ -670,8 +856,10 @@ def spectra(samples, a):
         divisors = divisors.copy()
         divisors[divisors == 0] = 1
     curves = np.array([
-        evaluate(window, s.frequencies, w, width) / d
-        for s, w, d in zip(samples, weights, divisors)
+        curve / d
+        for curve, d in zip(evaluate_many(
+            [(window, s.frequencies, w, width) for s, w in zip(samples, weights)],
+            jobs=a.jobs, verbose=False), divisors)
     ])
     return dict(
         width=width, full=full, raw=raw, weights=weights, divisors=divisors,
@@ -886,16 +1074,39 @@ def draw(samples, axes, headings, cells, reference, result, a, plot_title, title
                 # compare_raman.py --sticks): scale each stick to a fraction
                 # of the panel max so it stays within the shared y-limits.
                 if a.sticks:
+                    # All sticks for this panel are drawn as ONE LineCollection
+                    # (a single artist / draw call) rather than one vlines()
+                    # Line2D per mode -- that per-mode artist overhead is the
+                    # dominant cost for large mode counts (tens of thousands of
+                    # NAC directional sticks), and is exactly how
+                    # plot_raman.py renders its stick spectrum.
                     freqs = samples[index].frequencies
                     w = weights[index]
                     wmax = float(w.max()) if w.size else 0.0
                     if wmax > 0:
                         stick_scale = a.stick_max / wmax
-                        for f_val, w_val in zip(freqs, w):
-                            if w_val > 0 and freq_min <= f_val <= freq_max:
-                                ax.vlines(f_val, 0.0, w_val * stick_scale,
-                                          color=color_stick, lw=lw_stick,
-                                          alpha=alpha_stick, zorder=2)
+                        f_arr = np.asarray(freqs, dtype=float)
+                        w_arr = np.asarray(w, dtype=float)
+                        sel = (w_arr > 0) & (f_arr >= freq_min) & (f_arr <= freq_max)
+                        if np.any(sel):
+                            # NB: local is ``f_sel`` (NOT ``fs``) -- ``fs`` is
+                            # the base font size in this function and must not
+                            # be shadowed.
+                            f_sel = f_arr[sel]
+                            tops = w_arr[sel] * stick_scale
+                            # Each stick is a segment (f, 0) -> (f, top).
+                            segments = np.empty((f_sel.size, 2, 2))
+                            segments[:, 0, 0] = f_sel
+                            segments[:, 0, 1] = 0.0
+                            segments[:, 1, 0] = f_sel
+                            segments[:, 1, 1] = tops
+                            ax.add_collection(LineCollection(
+                                segments,  # type: ignore[reportArgumentType]
+                                colors=color_stick,
+                                alpha=alpha_stick,
+                                linewidths=lw_stick,
+                                zorder=2,
+                            ))
 
                 # per-panel peak labels (new, matches
                 # compare_raman.py --n-labels; prominence-ranked,
@@ -1029,19 +1240,26 @@ def _default_out(samples, a):
     extensionless prefix; save() appends each requested format). When the user
     passes --out, that value is used verbatim instead.
     """
+    # Derive the default filename once so both branches can use it.
+    name = build_output_name(
+        [s.metadata for s in samples],
+        _NORM_CODE[a.norm],
+        a.raw_act,
+    )
+    # build_output_name returns "compare_<formula>_<suffix>_<norm>.png";
+    # promote the leading "compare_" to "compare_matrix_" to keep the two
+    # scripts' default filenames distinct.
+    if name.startswith('compare_'):
+        name = 'compare_matrix_' + name[len('compare_'):]
+
     if a.out is not None:
         out = Path(a.out)
+        # If the user pointed --out at an existing *directory* (or the
+        # --matrix-root default), drop the default filename inside it rather
+        # than treating it as a file stem.
+        if out.is_dir():
+            out = out / name
     else:
-        name = build_output_name(
-            [s.metadata for s in samples],
-            _NORM_CODE[a.norm],
-            a.raw_act,
-        )
-        # build_output_name returns "compare_<formula>_<suffix>_<norm>.png";
-        # promote the leading "compare_" to "compare_matrix_" to keep the two
-        # scripts' default filenames distinct.
-        if name.startswith('compare_'):
-            name = 'compare_matrix_' + name[len('compare_'):]
         out = Path(name)
     # Drop any image-file extension so save() can append each format cleanly.
     return out.with_suffix('') if out.suffix.lower() in {'.pdf', '.png', '.svg'} else out
@@ -1114,26 +1332,33 @@ def save(fig, samples, layout, result, a):
 # Main orchestration (mirrors compare_raman.py main())
 # ---------------------------------------------------------------------------
 
+def _build_figure(a):
+    """Shared pipeline: load, check, arrange, compute, draw, save."""
+    samples = [load_sample(path, a) for path in input_paths(a)]
+    check_metadata(samples)
+    layout = arrange(samples, a)
+    result = spectra(samples, a)
+    _, axes, headings, cells, reference = layout
+    plot_title, title_line = build_plot_title(samples, a, result['width'])
+    if title_line in ("line1", "line2"):
+        plot_title = select_title_line(plot_title or "", title_line)
+    fig = draw(samples, axes, headings, cells, reference, result, a,
+               plot_title, title_line)
+    try:
+        outputs = save(fig, samples, layout, result, a)
+    finally:
+        plt.close(fig)
+    return samples, layout, result, outputs
+
+
 def main(argv=None):
     """Read spectra, infer composition groups, and save static comparison figures."""
     a = arguments(argv)
     try:
-        samples = [load_sample(path, a) for path in input_paths(a)]
-        check_metadata(samples)
-        layout = arrange(samples, a)
-        result = spectra(samples, a)
-        _, axes, headings, cells, reference = layout
-        plot_title, title_line = build_plot_title(samples, a, result['width'])
-        if title_line in ("line1", "line2"):
-            plot_title = select_title_line(plot_title or "", title_line)
-        fig = draw(samples, axes, headings, cells, reference, result, a,
-                   plot_title, title_line)
-        try:
-            outputs = save(fig, samples, layout, result, a)
-        finally:
-            plt.close(fig)
+        samples, layout, result, outputs = _build_figure(a)
     except (OSError, ValueError, InvalidOperation) as exc:
         raise SystemExit(f'Error: {exc}') from exc
+    mode, axes, headings, cells, reference = layout
 
     print(f'Comparing {len(samples)} spectra '
           f'[{("Raw Activity S(nu)" if a.raw_act else f"Stokes Intensity (T={a.temp:g} K, {a.laser_wl:g} nm)")}]:')

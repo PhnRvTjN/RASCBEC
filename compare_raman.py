@@ -37,7 +37,7 @@ Why this matters for multi-composition comparisons:
    low-frequency intensity by 4x to 7x relative to high-frequency Ti-O stretches
    (500-600 cm^-1).
 3. By default, this updated script converts all input CSV activities to physical
-   Stokes scattered intensities at T = 350 K (632.8 nm laser line), directly
+   Stokes scattered intensities at T = 300 K (632.8 nm laser line), directly
    matching experimental multi-composition waterfall comparisons. Raw activity
    comparison remains available via ``--raw-act``.
 
@@ -67,30 +67,33 @@ Constraints and Layout:
   Colours use the hue-sorted tab10 / turbo logic.
 
 Usage:
-    # Waterfall with Stokes conversion (T=350 K, default), all *.csv in cwd
-    python compare_raman.py --offset 1.2
+    # Waterfall with Stokes conversion (T=300 K, default), all *.csv in cwd
+    python compare_raman.py --offset 0.4
 
     # Comparing columnar vs rock-salt LLTO arrangements
-    python compare_raman.py C-210-79_E0.02.csv R-616-59_E0.02.csv --offset 1.2
+    python compare_raman.py C-210-79_E0.02.csv R-616-59_E0.02.csv --offset 0.4
 
     # Variable temperature comparison
-    python compare_raman.py *.csv --offset 1.2 --temp 100
-    python compare_raman.py *.csv --offset 1.2 --temp 600
+    python compare_raman.py *.csv --offset 0.4 --temp 100
+    python compare_raman.py *.csv --offset 0.4 --temp 600
 
     # Legacy raw Raman activity S(nu) mode (no 1/nu or thermal factors)
-    python compare_raman.py *.csv --offset 1.2 --raw-act
+    python compare_raman.py *.csv --offset 0.4 --raw-act
 
     # Explicit global normalisation (preserves relative intensity between systems)
-    python compare_raman.py *.csv --norm --offset 1.2
+    python compare_raman.py *.csv --norm --offset 0.4
 
     # Custom laser excitation wavelength (e.g. 632.8 nm HeNe)
-    python compare_raman.py *.csv --offset 1.2 --laser-wl 632.8
+    python compare_raman.py *.csv --offset 0.4 --laser-wl 632.8
 """
 
 import argparse
 import colorsys
 import glob as _glob
+import multiprocessing as mp
+import os
 import re
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -99,6 +102,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgb
+from matplotlib.collections import LineCollection
 
 from plot_raman import (
     activity_to_stokes_intensity, build_raman_title,
@@ -108,6 +112,9 @@ from plot_raman import (
     STICK_A, STICK_LW, STICK_MAX_FRAC,
     ASPECT_RATIO, UWM_GOLD, UWM_GREY
 )
+# Shared --jobs worker-count resolution (same helper the NAC/phonopy pipeline
+# uses) so the broadening-parallelism knob behaves identically everywhere.
+import gen_nac as nq
 
 # ---------------------------------------------------------------------------
 # Defaults (aligned with plot_raman.py / plot_raman_waterfall.py)
@@ -187,6 +194,62 @@ def build_spectrum(
         if w > 0:
             spectrum += lorentzian(x, f, w, gamma)
     return spectrum
+
+
+def _broaden_one(payload: tuple) -> np.ndarray:
+    """Broaden one spectrum (worker unit).
+
+    Module-level (not a closure) so it is picklable and can run in a
+    ``ProcessPoolExecutor`` -- the Lorentzian sum is pure NumPy and GIL-bound,
+    so a *process* pool (not threads) gives real CPU parallelism. Each payload
+    is self-contained (its own freqs/weights, the shared grid x, gamma), so
+    workers need no cross-process coordination and the output is bit-identical
+    to the sequential path (same float operations, same order per spectrum).
+
+    Parameters
+    ----------
+    payload : tuple
+        (freqs_cm1, weights, x, gamma) -- all plain ndarrays / floats.
+
+    Returns
+    -------
+    np.ndarray -- the broadened spectrum on the shared grid ``x``.
+    """
+    freqs_cm1, weights, x, gamma = payload
+    return build_spectrum(freqs_cm1, weights, x, gamma)
+
+
+def broaden_spectra(all_freqs, all_weights, x, gamma, jobs=None):
+    """Broaden every spectrum, in parallel across files when beneficial.
+
+    Mirrors the repo's parallelism pattern (``gen_nac.py`` /
+    ``RASCBEC_phonopy.py``): a ``ProcessPoolExecutor`` with a ``fork`` context
+    (reuses the already-imported NumPy, no re-import), at most one worker per
+    spectrum and per CPU. Falls back to the sequential loop when there is
+    nothing to parallelise or ``jobs`` resolves to 1. Results are returned in
+    input order regardless of completion order.
+    """
+    payloads = [(freqs, weights, x, gamma)
+                for freqs, weights in zip(all_freqs, all_weights)]
+    n = len(payloads)
+    if n <= 1 or jobs is not None and jobs <= 1:
+        return [_broaden_one(p) for p in payloads]
+
+    workers = min(n, nq.resolve_worker_count(
+        jobs, max(1, os.cpu_count() or 1)))
+    if workers <= 1:
+        return [_broaden_one(p) for p in payloads]
+
+    # 'fork' reuses the already-imported module in workers (no re-import of
+    # numpy/matplotlib); safe here because no threads are running at fork time.
+    try:
+        ctx = mp.get_context('fork')
+    except ValueError:  # platforms without fork
+        ctx = None
+    print(f"  broadening {n} spectra on {workers} worker process(es) "
+          f"(--jobs {jobs if jobs is not None else 'auto'})", flush=True)
+    with ProcessPoolExecutor(max_workers=workers, mp_context=ctx) as pool:
+        return list(pool.map(_broaden_one, payloads, chunksize=1))
 
 
 # ---------------------------------------------------------------------------
@@ -330,7 +393,29 @@ def parse_args():
                    help='Directory to search for *.csv input files when no '
                         'files are given on the command line (default: cwd).')
     p.add_argument('--out', default=None,
-                   help='Output PNG filename (default: compare_<formula>_<mode>_<norm>.png)')
+                   help='Output image filename (default: compare_<formula>_<mode>_<norm>.png). '
+                        'Extension is inferred; .svg is written when --vector is given.')
+
+    # --- output format / resolution (same levers as plot_raman.py) ---
+    p.add_argument('--vector', action='store_true',
+                   help='Write a resolution-independent SVG instead of a PNG '
+                        '(mirrors plot_raman.py --vector). Implied by an '
+                        'explicit --out ...svg extension; also faster than a '
+                        '600-dpi raster.')
+    p.add_argument('--dpi', type=int, default=None,
+                   help='Raster resolution for PNG output (default: the '
+                        "rcParams['savefig.dpi'] = 600). Lower values render "
+                        'faster at the cost of raster resolution; ignored for '
+                        'vector/SVG output.')
+
+    # --- parallelism ---
+    p.add_argument('--jobs', type=int, default=None,
+                   help='Number of worker processes to use for the Lorentzian '
+                        'broadening (the only CPU-bound step). Each spectrum is '
+                        'independent, so they broaden in parallel. Default: '
+                        'auto = min(#files, CPU count). 1 forces sequential '
+                        'processing (the original behaviour). The figure render '
+                        'and CSV parsing are not parallelized (single figure).')
 
     # --- physical model (what is plotted and under what conditions) ---
     p.add_argument('--temp', type=float, default=DEFAULT_TEMP,
@@ -513,11 +598,10 @@ def build_all_spectra(all_freqs, all_acts, args):
             )
         all_weights.append(weights)
 
-    # Build broadened spectra from calculated weights
-    spectra = [
-        build_spectrum(freqs, weights, x, gamma)
-        for freqs, weights in zip(all_freqs, all_weights)
-    ]
+    # Build broadened spectra from calculated weights. Each spectrum is an
+    # independent unit of work, so broaden across files in parallel (see
+    # broaden_spectra); --jobs 1 reproduces the original sequential loop.
+    spectra = broaden_spectra(all_freqs, all_weights, x, gamma, jobs=args.jobs)
 
     # Mask to the displayed frequency window; all window-dependent quantities
     # (trace-label position, peak labels, sticks) use in_window, while
@@ -731,11 +815,33 @@ def draw_waterfall(ax, *, spectra, vis, all_freqs, all_weights, all_irreps,
             )
 
         if args.sticks and freqs.size:
-            stick_scale = STICK_MAX_FRAC / weights.max() if weights.max() > 0 else 1.0
-            for f_val, w_val in zip(freqs, weights):
-                if w_val > 0 and freq_min <= f_val <= freq_max:
-                    ax.vlines(f_val, baseline, baseline + w_val * stick_scale,
-                              color=color, lw=STICK_LW, alpha=STICK_A, zorder=3)
+            # All sticks for this trace are drawn as ONE LineCollection (a
+            # single artist / draw call) rather than one vlines() Line2D per
+            # mode -- the per-mode artist overhead is the dominant cost for
+            # large mode counts, and this is exactly how plot_raman.py renders
+            # its stick spectrum. Sticks start at this trace's waterfall
+            # baseline (baseline + stick height).
+            wmax = weights.max()
+            stick_scale = STICK_MAX_FRAC / wmax if wmax > 0 else 1.0
+            f_arr = np.asarray(freqs, dtype=float)
+            w_arr = np.asarray(weights, dtype=float)
+            sel = (w_arr > 0) & (f_arr >= freq_min) & (f_arr <= freq_max)
+            if np.any(sel):
+                fs = f_arr[sel]
+                tops = baseline + w_arr[sel] * stick_scale
+                # Each stick is a segment (f, baseline) -> (f, top).
+                segments = np.empty((fs.size, 2, 2))
+                segments[:, 0, 0] = fs
+                segments[:, 0, 1] = baseline
+                segments[:, 1, 0] = fs
+                segments[:, 1, 1] = tops
+                ax.add_collection(LineCollection(
+                    segments,  # type: ignore[reportArgumentType]
+                    colors=color,
+                    alpha=STICK_A,
+                    linewidths=STICK_LW,
+                    zorder=3,
+                ))
 
         if show_labels:
             # Prominence-based peak selection with split-Lorentzian-shoulder
@@ -851,10 +957,22 @@ def main():
     ax.set_title(plot_title or "")
 
     fig.tight_layout()
-    out_png = args.out or build_output_name(all_meta, norm_mode, args.raw_act)
-    fig.savefig(out_png, bbox_inches="tight")
+    # Output format / resolution (same levers as plot_raman.py --vector/--dpi).
+    # --vector (or an explicit --out ...svg) yields a resolution-independent
+    # SVG; otherwise a PNG at --dpi (default rcParams savefig.dpi = 600).
+    out_name = args.out or build_output_name(all_meta, norm_mode, args.raw_act)
+    vector = args.vector or str(out_name).lower().endswith('.svg')
+    out_path = Path(out_name)
+    if vector and not str(out_name).lower().endswith('.svg'):
+        out_path = out_path.with_suffix('.svg')
+    save_kwargs: dict = {"bbox_inches": "tight"}
+    if vector:
+        save_kwargs["format"] = "svg"
+    elif args.dpi:
+        save_kwargs["dpi"] = int(args.dpi)
+    fig.savefig(out_path, **save_kwargs)
     plt.close(fig)
-    print(f"\nSaved: {out_png}")
+    print(f"\nSaved: {out_path}")
 
 
 if __name__ == '__main__':
