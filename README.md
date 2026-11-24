@@ -6,13 +6,13 @@
 
 ## Built for Speed
 
-Every stage of the pipeline is engineered for throughput: a full composition series — the eight finite-field BEC runs, the NAC multi-direction averaging, and the multi-composition figures — completes in a small fraction of the time a naive implementation requires. The physics is unchanged from the original; the speed gains come from replacing Python-level loops, serial file I/O, and single-threaded bottlenecks with vectorised computation, parallel execution, and I/O that reads only what it needs.
+Every stage of the pipeline is engineered for throughput: a full composition series - the eight finite-field BEC runs, the NAC multi-direction averaging, and the multi-composition figures - completes in a small fraction of the time a naive implementation requires. The physics is unchanged from the original; the speed gains come from replacing Python-level loops, serial file I/O, and single-threaded bottlenecks with vectorised computation, parallel execution, and I/O that reads only what it needs.
 
 | Technique | Where | Why it is fast |
 | --- | --- | --- |
 | **Vectorised Raman activity** | `RASCBEC_phonopy.py`, `RASCBEC_VASP.py` | The O(N·27) nested-Placzek loop is a single BLAS-backed `np.einsum('tikj,sti->sjk')` — the dominant CPU cost of the original, dropping from hours to seconds for large supercells |
 | **Process-pool parallelism** (`--jobs`) | all compute/plot scripts | Each independent unit (a BEC `OUTCAR`, a NAC direction, or a spectrum's Lorentzian broadening) runs in its own worker process via a `fork` context, so multi-CPU machines are fully used instead of single-threaded. `--jobs 1` reproduces the sequential path |
-| **Parallel per-direction phonopy** (`--jobs`, `--threads`) | `gen_nac.py` | The NAC direction runs are embarrassingly parallel; workers × threads is capped to the core count so N processes don't oversubscribe the box |
+| **Parallel per-direction phonopy** (`--jobs`, `--threads`) | `gen_nac.py` | The NAC direction runs are parallel processed; workers × threads is capped to the core count so N processes don't oversubscribe the box |
 | **Reverse-scan BEC reader** | `RASCBEC_phonopy.py`, `RASCBEC_VASP.py` | Reads from the *end* of the `OUTCAR` to the last BEC block, so a multi-GB file is not fully re-parsed for the one block needed |
 | **Minimal stray E-field** (setup guidance) | INCAR guidance | Setting inactive `EFIELD_PEAD` components to `1E-4` rather than `0` avoids VASP's implicit reset to `+0.01`, keeping the total stray field small so each SCF converges in fewer iterations — faster BEC runs with no change to the central-difference result |
 | **Single-collection stick rendering** | `plot_raman.py`, `compare_raman.py`, `compare_raman_matrix.py` | Tens of thousands of mode sticks are drawn as one `LineCollection` instead of one line artist per mode — the difference between seconds and minutes for multi-thousand-mode NAC output |
@@ -474,7 +474,7 @@ compare_Na3PS4_activity_enorm.png # raw Raman activity S(nu), per-spectrum
 
 The steps above compute a **single** Gamma-point spectrum. For the spherically-averaged NAC spectrum (non-analytic-corrected phonons sampled over a Lebedev-Laikov rule), replace step 3's single YAML with a set of per-direction runs. `RASCBEC_VASP.py` does **not** support this path.
 
-> **Before 7a — provide a `BORN` file.** NAC needs the Born effective charges, so `gen_nac.py` takes `BORN` from the current `<NN>_<token>phon/<composition>` directory (or, failing that, from the previous stage `Project/<NN-1>_<token>bec*/<composition>/BORN` — e.g. `08_rebec` for `09_rephon`, `03_bec` for `04_phon`) and symlinks it into every direction folder, aborting if neither is found. Generate that `BORN` file from a **VASP LEPSILON calculation** (`LEPSILON = .TRUE.` with `LCALCEPS = .TRUE.`) and place it in one of those two locations. This is distinct from the 8 finite-field BEC `OUTCAR` derivatives (step 2), which `RASCBEC_phonopy.py` reads separately.
+> **Before 7a — provide a `BORN` file.** NAC needs the Born effective charges, so `gen_nac.py` takes `BORN` from the current `<NN>_<token>phon/<composition>` directory (or, failing that, from the previous stage `Project/<NN-1>_<token>bec*/<composition>/BORN` — e.g. `08_rebec` for `09_rephon`, `03_bec` for `04_phon`) and symlinks it into every direction folder, aborting if neither is found. Generate that `BORN` file from a **VASP LEPSILON calculation** (`LEPSILON = .TRUE.`) and place it in one of those two locations. This is distinct from the 8 finite-field BEC `OUTCAR` derivatives (step 2), which `RASCBEC_phonopy.py` reads separately.
 
 ```bash
 # 7a. Scaffold one self-contained phonopy project per NAC direction
